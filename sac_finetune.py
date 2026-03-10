@@ -5,30 +5,49 @@ import numpy as np
 import copy
 from collections import deque
 import random
+import logging
+import os
+from datetime import datetime
+from tqdm import tqdm
 
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.env_utils as EnvUtils
 
 # ─────────────────────────────────────────────
-# 1. GMM reparameterized sample helper
+# Logging setup
+# ─────────────────────────────────────────────
+os.makedirs("rl_finetune/logs", exist_ok=True)
+run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_path = f"rl_finetune/logs/sac_{run_name}.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    handlers=[
+        logging.FileHandler(log_path),
+        logging.StreamHandler(),  # also print to terminal
+    ]
+)
+log = logging.getLogger()
+
+
+# ─────────────────────────────────────────────
+# 1. GMM reparameterized sample
 # ─────────────────────────────────────────────
 def gmm_rsample_with_log_prob(dist):
-    mixture    = dist.mixture_distribution
-    components = dist.component_distribution
-    logits     = mixture.logits                              # (B, T, 5)
-    gumbel_w   = F.gumbel_softmax(logits, tau=1.0, hard=True)  # (B, T, 5)
-    all_samples = components.rsample()                       # (B, T, 5, 7)
-    sample     = (gumbel_w.unsqueeze(-1) * all_samples).sum(dim=-2)  # (B, T, 7)
-    log_prob   = dist.log_prob(sample)                       # (B, T)
+    mixture     = dist.mixture_distribution
+    components  = dist.component_distribution
+    logits      = mixture.logits
+    gumbel_w    = F.gumbel_softmax(logits, tau=1.0, hard=True)
+    all_samples = components.rsample()
+    sample      = (gumbel_w.unsqueeze(-1) * all_samples).sum(dim=-2)
+    log_prob    = dist.log_prob(sample)
     return sample, log_prob
 
 
 # ─────────────────────────────────────────────
-# 2. Twin Q-network (critic)
-#    Input: encoded obs features + action
-#    The actor's encoder is shared — we pass
-#    features directly, not raw obs
+# 2. Twin Q-network
 # ─────────────────────────────────────────────
 class TwinQNetwork(nn.Module):
     def __init__(self, obs_feat_dim, action_dim, hidden_dim=1024):
@@ -51,19 +70,17 @@ class TwinQNetwork(nn.Module):
 
 
 # ─────────────────────────────────────────────
-# 3. Replay buffer — stores sequences of length
-#    SEQ_LEN so we can do burn-in
+# 3. Replay buffer
 # ─────────────────────────────────────────────
 OBS_KEYS = ['agentview_image', 'robot0_eye_in_hand_image',
             'robot0_eef_pos', 'robot0_eef_quat', 'robot0_gripper_qpos']
 
 class SequenceReplayBuffer:
     def __init__(self, capacity, seq_len, obs_keys):
-        self.capacity = capacity
-        self.seq_len  = seq_len
-        self.obs_keys = obs_keys
-        self.buffer   = deque(maxlen=capacity)
-        # Current episode being built
+        self.capacity    = capacity
+        self.seq_len     = seq_len
+        self.obs_keys    = obs_keys
+        self.buffer      = deque(maxlen=capacity)
         self._current_ep = []
 
     def _filter_obs(self, obs):
@@ -75,37 +92,10 @@ class SequenceReplayBuffer:
             'action':   action,
             'reward':   reward,
             'next_obs': self._filter_obs(next_obs),
-            'done':     done,
+            'done':     float(done),
         })
-        if done:
-            # Slice episode into overlapping sequences
-            ep = self._current_ep
-            for start in range(0, len(ep), self.seq_len // 2):
-                seq = ep[start: start + self.seq_len]
-                if len(seq) == self.seq_len:
-                    self.buffer.append(seq)
-            self._current_ep = []
-
-    def sample(self, batch_size, device):
-        seqs = random.sample(self.buffer, batch_size)
-        # Stack into tensors: (B, T, ...)
-        def stack_key(key, subkey=None):
-            if subkey:
-                vals = [[s[key][subkey] for s in seq] for seq in seqs]
-            else:
-                vals = [[s[key] for s in seq] for seq in seqs]
-            arr = np.array(vals, dtype=np.float32)
-            return torch.tensor(arr, device=device)
-
-        obs_batch      = {k: stack_key('obs', k)      for k in self.obs_keys}
-        next_obs_batch = {k: stack_key('next_obs', k) for k in self.obs_keys}
-        actions  = stack_key('action')                   # (B, T, 7)
-        rewards  = stack_key('reward')                   # (B, T)
-        dones    = stack_key('done')                     # (B, T)
-        return obs_batch, actions, rewards, next_obs_batch, dones
 
     def flush_episode(self):
-        """Force-flush current episode even if done wasn't set."""
         ep = self._current_ep
         for start in range(0, len(ep), self.seq_len // 2):
             seq = ep[start: start + self.seq_len]
@@ -113,82 +103,99 @@ class SequenceReplayBuffer:
                 self.buffer.append(seq)
         self._current_ep = []
 
+    def sample(self, batch_size, device):
+        seqs = random.sample(self.buffer, batch_size)
+
+        def stack_key(key, subkey=None):
+            if subkey:
+                vals = [[s[key][subkey] for s in seq] for seq in seqs]
+            else:
+                vals = [[s[key] for s in seq] for seq in seqs]
+            return torch.tensor(np.array(vals, dtype=np.float32), device=device)
+
+        obs_batch      = {k: stack_key('obs', k)      for k in self.obs_keys}
+        next_obs_batch = {k: stack_key('next_obs', k) for k in self.obs_keys}
+        actions        = stack_key('action')
+        rewards        = stack_key('reward')
+        dones          = stack_key('done')
+        return obs_batch, actions, rewards, next_obs_batch, dones
+
     def __len__(self):
         return len(self.buffer)
 
 
 # ─────────────────────────────────────────────
-# 4. Helper: encode obs dict → flat feature
-#    Uses the actor's trained encoder (shared)
+# 4. Encode obs
 # ─────────────────────────────────────────────
+
 def encode_obs(actor, obs_dict):
-    """obs_dict values shape: (B, T, ...) → returns (B, T, 137)"""
-    return actor.nets["encoder"](obs=obs_dict)
+    """
+    obs_dict values: (B, T, ...) 
+    Conv2d can't handle the T dim, so fold it into B, encode, then unfold.
+    """
+    # Get B and T from any key
+    sample_val = next(iter(obs_dict.values()))
+    B, T = sample_val.shape[:2]
+
+    # Fold T into B: (B, T, ...) -> (B*T, ...)
+    flat_obs = {k: v.reshape(B * T, *v.shape[2:]) for k, v in obs_dict.items()}
+
+    # Encode: (B*T, 137)
+    feat = actor.nets["encoder"](obs=flat_obs)
+
+    # Unfold back: (B*T, 137) -> (B, T, 137)
+    return feat.reshape(B, T, -1)
 
 
 # ─────────────────────────────────────────────
-# 5. Helper: run actor with burn-in
-#    Returns dist and rnn_state over the LEARN
-#    half of the sequence only
+# 5. Actor forward with burn-in
 # ─────────────────────────────────────────────
 BURNIN_LEN = 5
 LEARN_LEN  = 5
 
 def actor_forward_with_burnin(actor, obs_dict):
-    """
-    obs_dict values: (B, T=10, ...)
-    Returns dist over last LEARN_LEN steps and the rnn state.
-    """
-    # Split into burn-in and learn halves
     burnin_obs = {k: v[:, :BURNIN_LEN] for k, v in obs_dict.items()}
     learn_obs  = {k: v[:, BURNIN_LEN:] for k, v in obs_dict.items()}
-
-    # Burn-in: no gradient
     with torch.no_grad():
         _, rnn_state = actor.forward_train(
             burnin_obs, rnn_init_state=None, return_state=True
         )
-
-    # Learn half: gradient flows
     dist, _ = actor.forward_train(
         learn_obs, rnn_init_state=rnn_state, return_state=True
     )
-    return dist   # MixtureSameFamily over (B, LEARN_LEN, 7)
+    return dist
 
 
 # ─────────────────────────────────────────────
-# 6. SAC update step
+# 6. SAC update
 # ─────────────────────────────────────────────
 def sac_update(actor, critic, critic_target, log_alpha,
                actor_optim, critic_optim, alpha_optim,
-               batch, target_entropy, gamma=0.99, tau=0.005, device='cuda'):
+               batch, target_entropy, gamma=0.99, tau=0.005,
+               bc_reg_weight=1.0):
+    actor.train()  # always enforce — eval() elsewhere can leak into here
+    critic.train()
 
     obs, actions, rewards, next_obs, dones = batch
-    # All shapes: (B, T, ...) but we only learn on last LEARN_LEN steps
-    # Slice rewards/dones/actions to learn half
-    actions_learn = actions[:, BURNIN_LEN:]   # (B, 5, 7)
-    rewards_learn = rewards[:, BURNIN_LEN:]   # (B, 5)
-    dones_learn   = dones[:, BURNIN_LEN:]     # (B, 5)
+    actions_learn = actions[:, BURNIN_LEN:]
+    rewards_learn = rewards[:, BURNIN_LEN:]
+    dones_learn   = dones[:, BURNIN_LEN:]
+    alpha         = log_alpha.exp().detach()
 
-    alpha = log_alpha.exp().detach()
-
-    # ── Critic update ──────────────────────────────
+    # Critic
     with torch.no_grad():
-        next_dist = actor_forward_with_burnin(actor, next_obs)
-        next_sample, next_lp = gmm_rsample_with_log_prob(next_dist)
-        next_lp = next_lp.clamp(-20, 2)
+        next_dist               = actor_forward_with_burnin(actor, next_obs)
+        next_sample, next_lp    = gmm_rsample_with_log_prob(next_dist)
+        next_lp                 = next_lp.clamp(-20, 2)
+        next_obs_learn          = {k: v[:, BURNIN_LEN:] for k, v in next_obs.items()}
+        next_feat               = encode_obs(actor, next_obs_learn)
+        q1_next, q2_next        = critic_target(next_feat, next_sample)
+        q_next                  = torch.min(q1_next, q2_next) - alpha * next_lp
+        q_target                = rewards_learn + gamma * (1.0 - dones_learn) * q_next
 
-        # Need features for critic — encode next_obs learn half
-        next_obs_learn = {k: v[:, BURNIN_LEN:] for k, v in next_obs.items()}
-        next_feat = encode_obs(actor, next_obs_learn)  # (B, 5, 137)
-
-        q1_next, q2_next = critic_target(next_feat, next_sample)
-        q_next   = torch.min(q1_next, q2_next) - alpha * next_lp
-        q_target = rewards_learn + gamma * (1.0 - dones_learn) * q_next
-
-    obs_learn = {k: v[:, BURNIN_LEN:] for k, v in obs.items()}
-    obs_feat  = encode_obs(actor, obs_learn)   # (B, 5, 137)
-    q1, q2    = critic(obs_feat, actions_learn)
+    obs_learn   = {k: v[:, BURNIN_LEN:] for k, v in obs.items()}
+    obs_feat    = encode_obs(actor, obs_learn)
+    q1, q2      = critic(obs_feat, actions_learn)
     critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
 
     critic_optim.zero_grad()
@@ -196,34 +203,33 @@ def sac_update(actor, critic, critic_target, log_alpha,
     torch.nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
     critic_optim.step()
 
-    # ── Actor update ───────────────────────────────
-    dist = actor_forward_with_burnin(actor, obs)
-    sample, lp = gmm_rsample_with_log_prob(dist)
-    lp = lp.clamp(-20, 2)
-
-    obs_feat_actor = encode_obs(actor, obs_learn)
-    q1_new, q2_new = critic(obs_feat_actor, sample)
-    actor_loss = (alpha * lp - torch.min(q1_new, q2_new)).mean()
+    # Actor
+    dist                   = actor_forward_with_burnin(actor, obs)
+    sample, lp             = gmm_rsample_with_log_prob(dist)
+    lp                     = lp.clamp(-20, 2)
+    obs_feat_actor         = encode_obs(actor, obs_learn)
+    q1_new, q2_new         = critic(obs_feat_actor, sample)
+    actor_loss             = (alpha * lp - torch.min(q1_new, q2_new)).mean()
 
     actor_optim.zero_grad()
     actor_loss.backward()
     torch.nn.utils.clip_grad_norm_(actor.parameters(), 1.0)
     actor_optim.step()
 
-    # ── Alpha update ───────────────────────────────
+    # Alpha
     alpha_loss = -(log_alpha * (lp.detach() + target_entropy)).mean()
     alpha_optim.zero_grad()
     alpha_loss.backward()
     alpha_optim.step()
 
-    # ── Soft update target critic ──────────────────
+    # Soft target update
     for p, p_t in zip(critic.parameters(), critic_target.parameters()):
         p_t.data.copy_(tau * p.data + (1 - tau) * p_t.data)
 
     return {
         'critic_loss': critic_loss.item(),
         'actor_loss':  actor_loss.item(),
-        'alpha':       alpha.item(),
+        'alpha':       log_alpha.exp().item(),
         'mean_q':      q1.mean().item(),
     }
 
@@ -231,30 +237,34 @@ def sac_update(actor, critic, critic_target, log_alpha,
 # ─────────────────────────────────────────────
 # 7. Evaluation
 # ─────────────────────────────────────────────
-def evaluate(policy, env, n_episodes=20):
+def evaluate(policy, env, n_episodes=10):
     successes = 0
-    for _ in range(n_episodes):
+    actor = policy.policy.nets["policy"]
+    actor.eval()
+    for i in tqdm(range(n_episodes), desc="  Evaluating", leave=False):
         obs = env.reset()
         policy.start_episode()
-        done = False
         t = 0
-        while not done and t < 400:
+        while t < 400:
             action = policy(obs)
-            obs, reward, done, info = env.step(action)
+            obs, _, _, _ = env.step(action)
             if env.is_success()["task"]:
                 successes += 1
                 break
             t += 1
+    actor.train()
     return successes / n_episodes
 
 
-
 # ─────────────────────────────────────────────
-# 8. Main training loop
+# 8. Main
 # ─────────────────────────────────────────────
 def main():
-    device = TorchUtils.get_torch_device(try_to_use_cuda=True)
+    device    = TorchUtils.get_torch_device(try_to_use_cuda=True)
     ckpt_path = "rl_finetune/model_epoch_220_Coffee_D1_success_0.9.pth"
+
+    log.info(f"Logging to {log_path}")
+    log.info("Loading policy...")
 
     policy, ckpt_dict = FileUtils.policy_from_checkpoint(
         ckpt_path=ckpt_path, device=device, verbose=False
@@ -268,131 +278,130 @@ def main():
         env_meta, render=False, render_offscreen=True, use_image_obs=True
     )
 
-    # Critic setup
-    OBS_FEAT_DIM  = 137
-    ACTION_DIM    = 7
-    critic        = TwinQNetwork(OBS_FEAT_DIM, ACTION_DIM).to(device)
+    # Critic
+    critic        = TwinQNetwork(137, 7).to(device)
     critic_target = copy.deepcopy(critic).to(device)
     for p in critic_target.parameters():
         p.requires_grad = False
 
     # Optimizers
-    actor_optim  = torch.optim.Adam(actor.parameters(),  lr=3e-5)  # lower LR for fine-tuning
+    actor_optim = torch.optim.Adam(actor.parameters(),  lr=3e-5)
     critic_optim = torch.optim.Adam(critic.parameters(), lr=3e-4)
-    log_alpha    = torch.tensor(0.0, requires_grad=True, device=device)
-    alpha_optim  = torch.optim.Adam([log_alpha], lr=3e-4)
+    log_alpha   = torch.tensor(-4.0, requires_grad=True, device=device)
+    alpha_optim = torch.optim.Adam([log_alpha], lr=3e-4)
+    target_entropy = -7.0
 
-    target_entropy = -ACTION_DIM  # standard SAC heuristic: -dim(A)
+    replay = SequenceReplayBuffer(capacity=5000, seq_len=10, obs_keys=OBS_KEYS)
 
-    # Replay buffer
-    replay = SequenceReplayBuffer(
-        capacity=5000, seq_len=BURNIN_LEN + LEARN_LEN, obs_keys=OBS_KEYS
-    )
+    # ── Seed buffer ──
+    log.info("Seeding replay buffer with BC rollouts...")
+    n_seed = 20
+    with tqdm(total=n_seed, desc="Seeding") as pbar:
+        for ep in range(n_seed):
+            obs = env.reset()
+            policy.start_episode()
+            t = 0
+            while t < 400:
+                action = policy(obs)
+                next_obs, _, done, _ = env.step(action)
+                success = env.is_success()["task"]
+                replay.add_step(obs, action, float(success), next_obs, done)
+                obs = next_obs
+                t += 1
+                if success:
+                    break
+            replay.flush_episode()
+            pbar.set_postfix(ep_len=t, buffer=len(replay))
+            pbar.update(1)
 
-    # ── Collect initial BC rollouts to seed the buffer ──
-    print("Collecting BC rollouts to seed replay buffer...")
-    n_seed_episodes = 20
-    for ep in range(n_seed_episodes):
-        obs = env.reset()
-        policy.start_episode()
-        done = False
-        t = 0
-        while not done and t < 400:
-            action = policy(obs)
-            next_obs, reward, done, info = env.step(action)
-            
-            success = env.is_success()["task"]  # returns {"task": True/False}
-            reward = float(success)
-            
-            replay.add_step(obs, action, reward, next_obs, done)
-            obs = next_obs
-            t += 1
+    log.info(f"Buffer seeded with {len(replay)} sequences.")
 
-            if success:
-                break  # stop the episode early on success
+    # ── BC baseline ──
+    log.info("Evaluating BC baseline...")
+    bc_sr = evaluate(policy, env, n_episodes=10)
+    log.info(f"BC baseline success rate: {bc_sr:.1%}")
 
-        replay.flush_episode()  # <-- force flush regardless of done
-        print(f"  Seed episode {ep+1}/{n_seed_episodes}, ep_len={t}, buffer size: {len(replay)}")
-
-    print(f"\nBuffer seeded with {len(replay)} sequences. Starting SAC fine-tuning...\n")
-
-    # ── Evaluate BC baseline before any RL ──
-    actor.eval()
-    bc_success = evaluate(policy, env, n_episodes=20)
-    actor.train()
-    print(f"BC baseline success rate: {bc_success:.1%}\n")
-
-    # ── SAC training loop ──
-    total_steps   = 0
-    update_every  = 10   # env steps between updates
-    batch_size    = 16
-    eval_interval = 1000
+    # ── SAC loop ──
+    TOTAL_STEPS   = 20_000
+    UPDATE_EVERY  = 10
+    BATCH_SIZE    = 16
+    EVAL_INTERVAL = 2_000
 
     obs = env.reset()
     policy.start_episode()
     ep_reward = 0
+    t = 0
+    best_sr = bc_sr
 
-    for step in range(50_000):
-        if step < 10 or step < 100 and step % 10 == 0:
-            print(f"Starting step {step} / 50,000")
+    pbar = tqdm(total=TOTAL_STEPS, desc="SAC training")
+    for step in range(TOTAL_STEPS):
 
-        # Act in environment
         with torch.no_grad():
             action = policy(obs)
 
-        next_obs, reward, done, info = env.step(action)
+        next_obs, _, done, _ = env.step(action)
         success = env.is_success()["task"]
-        reward = float(success)
+        reward  = float(success)
         replay.add_step(obs, action, reward, next_obs, done)
         ep_reward += reward
         obs = next_obs
-        total_steps += 1
-        t += 1  # actually increment t
+        t  += 1
 
         if success or t >= 400:
             replay.flush_episode()
-            print(f"  Episode done, ep_reward={ep_reward:.3f}, buffer={len(replay)}")
             obs = env.reset()
             policy.start_episode()
             ep_reward = 0
             t = 0
 
-
-        # Update networks
-        if len(replay) >= batch_size and step % update_every == 0:
-            batch = replay.sample(batch_size, device)
+        # Update
+        if len(replay) >= BATCH_SIZE and step % UPDATE_EVERY == 0:
+            actor.train()
+            batch = replay.sample(BATCH_SIZE, device)
             logs  = sac_update(
                 actor, critic, critic_target, log_alpha,
                 actor_optim, critic_optim, alpha_optim,
-                batch, target_entropy, device=device
+                batch, target_entropy
             )
+            pbar.set_postfix(
+                critic=f"{logs['critic_loss']:.3f}",
+                actor=f"{logs['actor_loss']:.3f}",
+                alpha=f"{logs['alpha']:.3f}",
+                q=f"{logs['mean_q']:.3f}",
+            )
+            if step % 500 == 0:
+                log.info(
+                    f"Step {step:5d} | critic={logs['critic_loss']:.3f} "
+                    f"actor={logs['actor_loss']:.3f} "
+                    f"alpha={logs['alpha']:.3f} "
+                    f"mean_q={logs['mean_q']:.3f} "
+                    f"buffer={len(replay)}"
+                )
 
-            if step % 100 == 0:
-                print(f"Step {step:5d} | critic={logs['critic_loss']:.3f} "
-                      f"actor={logs['actor_loss']:.3f} "
-                      f"alpha={logs['alpha']:.3f} "
-                      f"mean_q={logs['mean_q']:.3f}")
+        # Eval
+        if step > 0 and step % EVAL_INTERVAL == 0:
+            sr = evaluate(policy, env, n_episodes=10)
+            log.info(f">>> Step {step:5d} | success rate: {sr:.1%} (BC was {bc_sr:.1%})")
+            if sr > best_sr:
+                best_sr = sr
+                torch.save({
+                    'actor':        actor.state_dict(),
+                    'critic':       critic.state_dict(),
+                    'step':         step,
+                    'success_rate': sr,
+                }, "rl_finetune/sac_best.pth")
+                log.info(f"  *** New best model saved (sr={sr:.1%}) ***")
 
-        # Evaluate
-        if step > 0 and step % eval_interval == 0:
-            actor.eval()
-            sr = evaluate(policy, env, n_episodes=20)
-            actor.train()
-            print(f"\n>>> Step {step} eval success rate: {sr:.1%}\n")
+        pbar.update(1)
 
-            # Save checkpoint
-            torch.save({
-                'actor':  actor.state_dict(),
-                'critic': critic.state_dict(),
-                'step':   step,
-                'success_rate': sr,
-            }, f"rl_finetune/sac_checkpoint_step{step}.pth")
+    pbar.close()
 
     # Final eval
-    actor.eval()
-    final_sr = evaluate(policy, env, n_episodes=50)
-    print(f"\nFinal SAC success rate: {final_sr:.1%}")
-    print(f"BC baseline was:        {bc_success:.1%}")
+    final_sr = evaluate(policy, env, n_episodes=20)
+    log.info(f"\nFinal SAC success rate:  {final_sr:.1%}")
+    log.info(f"BC baseline was:         {bc_sr:.1%}")
+    log.info(f"Best during training:    {best_sr:.1%}")
+    log.info(f"Log saved to: {log_path}")
 
 
 if __name__ == "__main__":
