@@ -128,23 +128,15 @@ class SequenceReplayBuffer:
 # 4. Encode obs
 # ─────────────────────────────────────────────
 
-def encode_obs(actor, obs_dict):
-    """
-    obs_dict values: (B, T, ...) 
-    Conv2d can't handle the T dim, so fold it into B, encode, then unfold.
-    """
-    # Get B and T from any key
+def encode_obs(actor, obs_dict, detach=False):
     sample_val = next(iter(obs_dict.values()))
     B, T = sample_val.shape[:2]
-
-    # Fold T into B: (B, T, ...) -> (B*T, ...)
     flat_obs = {k: v.reshape(B * T, *v.shape[2:]) for k, v in obs_dict.items()}
-
-    # Encode: (B*T, 137)
     feat = actor.nets["encoder"](obs=flat_obs)
-
-    # Unfold back: (B*T, 137) -> (B, T, 137)
-    return feat.reshape(B, T, -1)
+    feat = feat.reshape(B, T, -1)
+    if detach:
+        feat = feat.detach()
+    return feat
 
 
 # ─────────────────────────────────────────────
@@ -172,7 +164,7 @@ def actor_forward_with_burnin(actor, obs_dict):
 def sac_update(actor, critic, critic_target, log_alpha,
                actor_optim, critic_optim, alpha_optim,
                batch, target_entropy, gamma=0.99, tau=0.005,
-               bc_reg_weight=1.0):
+               bc_reg_weight=1.0, update_actor=True):
     actor.train()  # always enforce — eval() elsewhere can leak into here
     critic.train()
 
@@ -188,13 +180,13 @@ def sac_update(actor, critic, critic_target, log_alpha,
         next_sample, next_lp    = gmm_rsample_with_log_prob(next_dist)
         next_lp                 = next_lp.clamp(-20, 2)
         next_obs_learn          = {k: v[:, BURNIN_LEN:] for k, v in next_obs.items()}
-        next_feat               = encode_obs(actor, next_obs_learn)
+        next_feat               = encode_obs(actor, next_obs_learn, detach=True)
         q1_next, q2_next        = critic_target(next_feat, next_sample)
         q_next                  = torch.min(q1_next, q2_next) - alpha * next_lp
         q_target                = rewards_learn + gamma * (1.0 - dones_learn) * q_next
 
     obs_learn   = {k: v[:, BURNIN_LEN:] for k, v in obs.items()}
-    obs_feat    = encode_obs(actor, obs_learn)
+    obs_feat    = encode_obs(actor, obs_learn, detach=True)
     q1, q2      = critic(obs_feat, actions_learn)
     critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
 
@@ -204,23 +196,35 @@ def sac_update(actor, critic, critic_target, log_alpha,
     critic_optim.step()
 
     # Actor
-    dist                   = actor_forward_with_burnin(actor, obs)
-    sample, lp             = gmm_rsample_with_log_prob(dist)
-    lp                     = lp.clamp(-20, 2)
-    obs_feat_actor         = encode_obs(actor, obs_learn)
-    q1_new, q2_new         = critic(obs_feat_actor, sample)
-    actor_loss             = (alpha * lp - torch.min(q1_new, q2_new)).mean()
+    if update_actor:
+        dist                   = actor_forward_with_burnin(actor, obs)
+        sample, lp             = gmm_rsample_with_log_prob(dist)
+        lp                     = lp.clamp(-20, 2)
+        obs_feat_actor         = encode_obs(actor, obs_learn, detach=False)
+        q1_new, q2_new         = critic(obs_feat_actor, sample)
 
-    actor_optim.zero_grad()
-    actor_loss.backward()
-    torch.nn.utils.clip_grad_norm_(actor.parameters(), 1.0)
-    actor_optim.step()
+        rl_loss = (alpha * lp - torch.min(q1_new, q2_new)).mean()
 
-    # Alpha
-    alpha_loss = -(log_alpha * (lp.detach() + target_entropy)).mean()
-    alpha_optim.zero_grad()
-    alpha_loss.backward()
-    alpha_optim.step()
+        bc_log_prob = dist.log_prob(actions_learn)
+        bc_loss = -bc_log_prob.mean()
+        
+        actor_loss = rl_loss + bc_reg_weight * bc_loss
+
+        actor_optim.zero_grad()
+        actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(actor.parameters(), 1.0)
+        actor_optim.step()
+
+        # Alpha
+        alpha_loss = -(log_alpha * (lp.detach() + target_entropy)).mean()
+        alpha_optim.zero_grad()
+        alpha_loss.backward()
+        alpha_optim.step()
+    else:
+        rl_loss = torch.tensor(0.0)
+        bc_loss = torch.tensor(0.0)
+        actor_loss = torch.tensor(0.0)
+
 
     # Soft target update
     for p, p_t in zip(critic.parameters(), critic_target.parameters()):
@@ -229,6 +233,8 @@ def sac_update(actor, critic, critic_target, log_alpha,
     return {
         'critic_loss': critic_loss.item(),
         'actor_loss':  actor_loss.item(),
+        'rl_loss':     rl_loss.item(),
+        'bc_loss':     bc_loss.item(),
         'alpha':       log_alpha.exp().item(),
         'mean_q':      q1.mean().item(),
     }
@@ -256,6 +262,21 @@ def evaluate(policy, env, n_episodes=10):
     return successes / n_episodes
 
 
+# Concatenate along batch dimension
+def cat_batches(b1, b2):
+    obs1, act1, rew1, nobs1, done1 = b1
+    obs2, act2, rew2, nobs2, done2 = b2
+    obs_cat  = {k: torch.cat([obs1[k],  obs2[k]],  dim=0) for k in obs1}
+    nobs_cat = {k: torch.cat([nobs1[k], nobs2[k]], dim=0) for k in nobs1}
+    return (
+        obs_cat,
+        torch.cat([act1,  act2],  dim=0),
+        torch.cat([rew1,  rew2],  dim=0),
+        nobs_cat,
+        torch.cat([done1, done2], dim=0),
+    )
+
+
 # ─────────────────────────────────────────────
 # 8. Main
 # ─────────────────────────────────────────────
@@ -271,6 +292,11 @@ def main():
     )
     bc_algo = policy.policy
     actor   = bc_algo.nets["policy"]
+
+    # After loading the actor, freeze the encoder
+    for p in actor.nets["encoder"].parameters():
+        p.requires_grad = False
+
     actor.train()
 
     env_meta = ckpt_dict["env_metadata"]
@@ -291,7 +317,10 @@ def main():
     alpha_optim = torch.optim.Adam([log_alpha], lr=3e-4)
     target_entropy = -7.0
 
-    replay = SequenceReplayBuffer(capacity=5000, seq_len=10, obs_keys=OBS_KEYS)
+    # replay = SequenceReplayBuffer(capacity=5000, seq_len=10, obs_keys=OBS_KEYS)
+    demo_replay   = SequenceReplayBuffer(capacity=2000, seq_len=10, obs_keys=OBS_KEYS)
+    online_replay = SequenceReplayBuffer(capacity=5000, seq_len=10, obs_keys=OBS_KEYS)
+
 
     # ── Seed buffer ──
     log.info("Seeding replay buffer with BC rollouts...")
@@ -305,20 +334,22 @@ def main():
                 action = policy(obs)
                 next_obs, _, done, _ = env.step(action)
                 success = env.is_success()["task"]
-                replay.add_step(obs, action, float(success), next_obs, done)
+                demo_replay.add_step(obs, action, float(success), next_obs, done)
                 obs = next_obs
                 t += 1
                 if success:
                     break
-            replay.flush_episode()
-            pbar.set_postfix(ep_len=t, buffer=len(replay))
+            demo_replay.flush_episode()
+            pbar.set_postfix(ep_len=t, buffer=len(demo_replay))
             pbar.update(1)
 
-    log.info(f"Buffer seeded with {len(replay)} sequences.")
+    log.info(f"Buffer seeded with {len(demo_replay)} demo sequences.")
+
+    EVAL_EPISODES = 20
 
     # ── BC baseline ──
     log.info("Evaluating BC baseline...")
-    bc_sr = evaluate(policy, env, n_episodes=10)
+    bc_sr = evaluate(policy, env, n_episodes=EVAL_EPISODES)
     log.info(f"BC baseline success rate: {bc_sr:.1%}")
 
     # ── SAC loop ──
@@ -333,6 +364,12 @@ def main():
     t = 0
     best_sr = bc_sr
 
+    DEMO_FRACTION = 0.25  # 25% of each batch from demos
+    CRITIC_WARMUP_STEPS = 3000
+
+    bc_reg_weight = 5.0  # initial weight for BC loss in actor updates
+    enable_bc_reg_decay = False  # whether to decay BC weight over time
+    init_bc_reg_weight = bc_reg_weight
     pbar = tqdm(total=TOTAL_STEPS, desc="SAC training")
     for step in range(TOTAL_STEPS):
 
@@ -342,46 +379,62 @@ def main():
         next_obs, _, done, _ = env.step(action)
         success = env.is_success()["task"]
         reward  = float(success)
-        replay.add_step(obs, action, reward, next_obs, done)
+        online_replay.add_step(obs, action, reward, next_obs, done)  # online only
         ep_reward += reward
         obs = next_obs
         t  += 1
 
         if success or t >= 400:
-            replay.flush_episode()
+            online_replay.flush_episode()
+            log.debug(f"Episode done | reward={ep_reward:.1f} | buffer={len(online_replay)}")
             obs = env.reset()
             policy.start_episode()
             ep_reward = 0
             t = 0
 
-        # Update
-        if len(replay) >= BATCH_SIZE and step % UPDATE_EVERY == 0:
+        # Update — need enough online transitions first
+        if len(online_replay) >= BATCH_SIZE and step % UPDATE_EVERY == 0:
             actor.train()
-            batch = replay.sample(BATCH_SIZE, device)
-            logs  = sac_update(
+
+            # Mix demo and online batches
+            n_demo   = max(1, int(BATCH_SIZE * DEMO_FRACTION))
+            n_online = BATCH_SIZE - n_demo
+
+            demo_batch   = demo_replay.sample(n_demo, device)
+            online_batch = online_replay.sample(n_online, device)
+
+            batch = cat_batches(demo_batch, online_batch)
+
+            # Decaying BC weight — heavy at start, fades as RL takes over
+            if enable_bc_reg_decay:
+                bc_reg_weight = init_bc_reg_weight * (0.999 ** step)
+
+            logs = sac_update(
                 actor, critic, critic_target, log_alpha,
                 actor_optim, critic_optim, alpha_optim,
-                batch, target_entropy
+                batch, target_entropy,
+                bc_reg_weight=bc_reg_weight,
+                update_actor=(step >= CRITIC_WARMUP_STEPS)
             )
             pbar.set_postfix(
                 critic=f"{logs['critic_loss']:.3f}",
-                actor=f"{logs['actor_loss']:.3f}",
-                alpha=f"{logs['alpha']:.3f}",
+                rl=f"{logs['rl_loss']:.3f}",
+                bc=f"{logs['bc_loss']:.3f}",
                 q=f"{logs['mean_q']:.3f}",
+                bc_w=f"{bc_reg_weight:.2f}",
             )
             if step % 500 == 0:
                 log.info(
                     f"Step {step:5d} | critic={logs['critic_loss']:.3f} "
-                    f"actor={logs['actor_loss']:.3f} "
-                    f"alpha={logs['alpha']:.3f} "
-                    f"mean_q={logs['mean_q']:.3f} "
-                    f"buffer={len(replay)}"
+                    f"rl_loss={logs['rl_loss']:.3f} bc_loss={logs['bc_loss']:.3f} "
+                    f"alpha={logs['alpha']:.3f} mean_q={logs['mean_q']:.3f} "
+                    f"bc_w={bc_reg_weight:.3f} online_buf={len(online_replay)}"
                 )
 
         # Eval
         if step > 0 and step % EVAL_INTERVAL == 0:
-            sr = evaluate(policy, env, n_episodes=10)
-            log.info(f">>> Step {step:5d} | success rate: {sr:.1%} (BC was {bc_sr:.1%})")
+            sr = evaluate(policy, env, n_episodes=EVAL_EPISODES)
+            log.info(f">>> Step {step:5d} | success rate: {sr:.1%} (BC was {bc_sr:.1%}) bc_w={bc_reg_weight:.3f}")
             if sr > best_sr:
                 best_sr = sr
                 torch.save({
@@ -397,8 +450,10 @@ def main():
     pbar.close()
 
     # Final eval
-    final_sr = evaluate(policy, env, n_episodes=20)
+    final_sr = evaluate(policy, env, n_episodes=EVAL_EPISODES)
     log.info(f"\nFinal SAC success rate:  {final_sr:.1%}")
+    final_sr_50 = evaluate(policy, env, n_episodes=50)
+    log.info(f"Final SAC success rate (50 eps): {final_sr_50:.1%}")
     log.info(f"BC baseline was:         {bc_sr:.1%}")
     log.info(f"Best during training:    {best_sr:.1%}")
     log.info(f"Log saved to: {log_path}")
