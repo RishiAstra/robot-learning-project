@@ -1,0 +1,27 @@
+# Generated training/evaluation artifacts
+tmp_runs/
+tmp_runs_*/
+rl_runs/
+rl_finetune/
+training_results/
+paper/
+
+# Model checkpoints and rollout media
+*.pth
+*.pt
+*.ckpt
+*.mp4
+*.gif
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Editor / OS cruft
+.idea/
+.DS_Store
+

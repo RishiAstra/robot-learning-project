@@ -15,6 +15,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -27,13 +28,17 @@ import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.torch_utils as TorchUtils
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+DEFAULT_CKPT = REPO_ROOT / "mimicgen/datasets/core_training_results/bc_rnn_low_dim_ds_stack_D0_seed_101/20260312210424/models/model_epoch_100_demo_success_1.0.pth"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Args  (CleanRL pattern)
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
 class Args:
-    ckpt_path: str = "rl_finetune/model_epoch_220_Coffee_D1_success_0.9.pth"
+    ckpt_path: str = str(DEFAULT_CKPT)
 
     total_timesteps: int = 100_000
     buffer_size: int = int(1e5)
@@ -56,11 +61,10 @@ class Args:
 
 
 OBS_KEYS = [
-    "agentview_image",
-    "robot0_eye_in_hand_image",
     "robot0_eef_pos",
     "robot0_eef_quat",
     "robot0_gripper_qpos",
+    "object",
 ]
 
 
@@ -204,10 +208,11 @@ def evaluate(policy, env, n_episodes: int, max_ep_len: int) -> float:
 def main():
     args   = tyro.cli(Args)
     device = TorchUtils.get_torch_device(try_to_use_cuda=True)
+    ckpt_path = str(Path(args.ckpt_path).expanduser().resolve())
 
     # ── Load BC-RNN policy ───────────────────────────────────────────────────
     policy, ckpt_dict = FileUtils.policy_from_checkpoint(
-        ckpt_path=args.ckpt_path, device=device, verbose=False
+        ckpt_path=ckpt_path, device=device, verbose=False
     )
     actor = policy.policy.nets["policy"]
 
@@ -219,7 +224,7 @@ def main():
     # ── Environment ──────────────────────────────────────────────────────────
     env = EnvUtils.create_env_from_metadata(
         ckpt_dict["env_metadata"],
-        render=False, render_offscreen=True, use_image_obs=True,
+        render=False, render_offscreen=False, use_image_obs=False,
     )
 
     obs_dim = infer_feat_dim(actor, env, device)

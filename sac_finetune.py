@@ -7,12 +7,18 @@ from collections import deque
 import random
 import logging
 import os
+import argparse
 from datetime import datetime
+from pathlib import Path
 from tqdm import tqdm
 
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.env_utils as EnvUtils
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+DEFAULT_CKPT = REPO_ROOT / "mimicgen/datasets/core_training_results/bc_rnn_low_dim_ds_stack_D0_seed_101/20260312210424/models/model_epoch_100_demo_success_1.0.pth"
 
 # ─────────────────────────────────────────────
 # Logging setup
@@ -74,6 +80,7 @@ class TwinQNetwork(nn.Module):
 # ─────────────────────────────────────────────
 OBS_KEYS = ['agentview_image', 'robot0_eye_in_hand_image',
             'robot0_eef_pos', 'robot0_eef_quat', 'robot0_gripper_qpos']
+LOW_DIM_OBS_KEYS = ['robot0_eef_pos', 'robot0_eef_quat', 'robot0_gripper_qpos', 'object']
 
 class SequenceReplayBuffer:
     def __init__(self, capacity, seq_len, obs_keys):
@@ -281,8 +288,17 @@ def cat_batches(b1, b2):
 # 8. Main
 # ─────────────────────────────────────────────
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ckpt-path", default=str(DEFAULT_CKPT))
+    parser.add_argument("--seed-episodes", type=int, default=20)
+    parser.add_argument("--total-steps", type=int, default=20_000)
+    parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument("--eval-interval", type=int, default=2_000)
+    parser.add_argument("--critic-warmup-steps", type=int, default=3000)
+    args = parser.parse_args()
+
     device    = TorchUtils.get_torch_device(try_to_use_cuda=True)
-    ckpt_path = "rl_finetune/model_epoch_220_Coffee_D1_success_0.9.pth"
+    ckpt_path = str(Path(args.ckpt_path).expanduser().resolve())
 
     log.info(f"Logging to {log_path}")
     log.info("Loading policy...")
@@ -301,11 +317,20 @@ def main():
 
     env_meta = ckpt_dict["env_metadata"]
     env = EnvUtils.create_env_from_metadata(
-        env_meta, render=False, render_offscreen=True, use_image_obs=True
+        env_meta, render=False, render_offscreen=False, use_image_obs=False
     )
 
+    obs_dim = None
+    sample_obs = env.reset()
+    sample_seq = {
+        key: torch.tensor(sample_obs[key], dtype=torch.float32, device=device).unsqueeze(0)
+        for key in LOW_DIM_OBS_KEYS
+    }
+    with torch.no_grad():
+        obs_dim = actor.nets["encoder"](obs=sample_seq).shape[-1]
+
     # Critic
-    critic        = TwinQNetwork(137, 7).to(device)
+    critic        = TwinQNetwork(obs_dim, 7).to(device)
     critic_target = copy.deepcopy(critic).to(device)
     for p in critic_target.parameters():
         p.requires_grad = False
@@ -318,13 +343,13 @@ def main():
     target_entropy = -7.0
 
     # replay = SequenceReplayBuffer(capacity=5000, seq_len=10, obs_keys=OBS_KEYS)
-    demo_replay   = SequenceReplayBuffer(capacity=2000, seq_len=10, obs_keys=OBS_KEYS)
-    online_replay = SequenceReplayBuffer(capacity=5000, seq_len=10, obs_keys=OBS_KEYS)
+    demo_replay   = SequenceReplayBuffer(capacity=2000, seq_len=10, obs_keys=LOW_DIM_OBS_KEYS)
+    online_replay = SequenceReplayBuffer(capacity=5000, seq_len=10, obs_keys=LOW_DIM_OBS_KEYS)
 
 
     # ── Seed buffer ──
     log.info("Seeding replay buffer with BC rollouts...")
-    n_seed = 20
+    n_seed = args.seed_episodes
     with tqdm(total=n_seed, desc="Seeding") as pbar:
         for ep in range(n_seed):
             obs = env.reset()
@@ -345,7 +370,7 @@ def main():
 
     log.info(f"Buffer seeded with {len(demo_replay)} demo sequences.")
 
-    EVAL_EPISODES = 20
+    EVAL_EPISODES = args.eval_episodes
 
     # ── BC baseline ──
     log.info("Evaluating BC baseline...")
@@ -353,10 +378,10 @@ def main():
     log.info(f"BC baseline success rate: {bc_sr:.1%}")
 
     # ── SAC loop ──
-    TOTAL_STEPS   = 20_000
+    TOTAL_STEPS   = args.total_steps
     UPDATE_EVERY  = 10
     BATCH_SIZE    = 16
-    EVAL_INTERVAL = 2_000
+    EVAL_INTERVAL = args.eval_interval
 
     obs = env.reset()
     policy.start_episode()
@@ -365,7 +390,7 @@ def main():
     best_sr = bc_sr
 
     DEMO_FRACTION = 0.25  # 25% of each batch from demos
-    CRITIC_WARMUP_STEPS = 3000
+    CRITIC_WARMUP_STEPS = args.critic_warmup_steps
 
     bc_reg_weight = 5.0  # initial weight for BC loss in actor updates
     enable_bc_reg_decay = False  # whether to decay BC weight over time
