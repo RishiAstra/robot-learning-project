@@ -21,6 +21,8 @@ from rl.sac import TwinQNetwork, sac_update
 
 os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
+FINAL_EVAL_EPISODES = 50
+
 
 class SACTrainer:
     def __init__(self, args):
@@ -64,7 +66,12 @@ class SACTrainer:
         self.online_replay = SequenceReplayBuffer(args.online_buffer_capacity, self.seq_len, self.obs_keys)
         self.demo_replay = SequenceReplayBuffer(args.demo_buffer_capacity, self.seq_len, self.obs_keys)
 
-        dataset_path = self.config.train.data[0]["path"]
+        # dataset_path = self.config.train.data[0]["path"]
+        data_cfg = self.config.train.data
+        if isinstance(data_cfg, str):
+            dataset_path = data_cfg
+        else:
+            dataset_path = data_cfg[0]["path"]
         load_demo_sequences(dataset_path, self.demo_replay, self.obs_keys, max_demos=args.demo_max_demos)
 
         self.output_dir = Path(args.output_dir).expanduser().resolve()
@@ -130,6 +137,28 @@ class SACTrainer:
         )
         print(f"saved {save_path}")
 
+    def save_final(self, step: int, stats):
+        """Save the final finetuned model and write accuracy results to a JSON file."""
+        method = self.args.method
+
+        model_path = self.output_dir / f"{method}_final.pth"
+        torch.save(
+            {
+                "actor": self.actor.state_dict(),
+                "critic": self.critic.state_dict(),
+                "step": step,
+                "stats": stats,
+                "args": vars(self.args),
+            },
+            model_path,
+        )
+        print(f"saved final model → {model_path}")
+
+        stats_path = self.output_dir / f"{method}_final_stats.json"
+        with open(stats_path, "w") as f:
+            json.dump({"step": step, "eval_episodes": FINAL_EVAL_EPISODES, **stats}, f, indent=4)
+        print(f"saved final stats → {stats_path}")
+
     def train(self):
         args = self.args
         baseline = evaluate_actor(self.actor, self.env, self.obs_keys, args.eval_episodes, args.max_ep_len)
@@ -176,8 +205,13 @@ class SACTrainer:
                     best_success = stats["Success_Rate"]
                     self.save_best(step, stats)
 
-        final_stats = evaluate_actor(self.actor, self.env, self.obs_keys, args.eval_episodes, args.max_ep_len)
+        # High-resolution final evaluation (50 episodes) + save model and stats
+        final_stats = evaluate_actor(
+            self.actor, self.env, self.obs_keys, FINAL_EVAL_EPISODES, args.max_ep_len
+        )
         print("final")
         print(json.dumps(final_stats, indent=4))
         print(f"elapsed_sec={time.time() - start_time:.1f}")
+
+        self.save_final(step=args.total_steps, stats=final_stats)
         return final_stats
