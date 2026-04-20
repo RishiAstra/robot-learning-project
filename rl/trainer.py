@@ -46,7 +46,7 @@ class SACTrainer:
         self.env = EnvUtils.create_env_from_metadata(
             self.ckpt_dict["env_metadata"],
             render=False,
-            render_offscreen=False,
+            render_offscreen=True,
             use_image_obs=False,
         )
         obs_feat_dim = infer_feature_dim(self.actor, self.obs_keys, self.env, self.device)
@@ -201,13 +201,13 @@ class SACTrainer:
                 stats = evaluate_actor(self.actor, self.env, self.obs_keys, args.eval_episodes, args.max_ep_len)
                 print(f"eval@{step}")
                 print(json.dumps(stats, indent=4))
-                if stats["Success_Rate"] > best_success:
+                if stats["Success_Rate"] >= best_success:
                     best_success = stats["Success_Rate"]
                     self.save_best(step, stats)
 
-        # High-resolution final evaluation (50 episodes) + save model and stats
+        video_dir = str(self.output_dir / "videos")
         final_stats = evaluate_actor(
-            self.actor, self.env, self.obs_keys, FINAL_EVAL_EPISODES, args.max_ep_len
+            self.actor, self.env, self.obs_keys, FINAL_EVAL_EPISODES, args.max_ep_len, video_dir
         )
         print("final")
         print(json.dumps(final_stats, indent=4))
