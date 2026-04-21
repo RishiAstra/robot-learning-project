@@ -23,6 +23,14 @@ from rl.sac import TwinQNetwork, sac_update
 os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
 
+def save_robomimic_policy_checkpoint(policy, ckpt_dict, save_path: Path, rl_state: dict) -> None:
+    updated_ckpt = dict(ckpt_dict)
+    updated_ckpt["model"] = policy.policy.serialize()
+    updated_ckpt["rl_state"] = rl_state
+    torch.save(updated_ckpt, save_path)
+    print(f"saved {save_path}")
+
+
 class SACTrainer:
     def __init__(self, args):
         self.args = args
@@ -128,17 +136,19 @@ class SACTrainer:
 
     def save_best(self, step: int, stats):
         save_path = self.output_dir / f"{self.args.method}_best.pth"
-        torch.save(
-            {
-                "actor": self.actor.state_dict(),
+        save_robomimic_policy_checkpoint(
+            self.policy,
+            self.ckpt_dict,
+            save_path,
+            rl_state={
                 "critic": self.critic.state_dict(),
+                "critic_target": self.critic_target.state_dict(),
+                "log_alpha": self.log_alpha.detach().cpu(),
                 "step": step,
                 "stats": stats,
                 "args": vars(self.args),
             },
-            save_path,
         )
-        print(f"saved {save_path}")
 
     def train(self):
         args = self.args
@@ -251,17 +261,17 @@ class PPOTrainer:
 
     def save_best(self, step: int, stats):
         save_path = self.output_dir / f"{self.args.method}_best.pth"
-        torch.save(
-            {
-                "actor": self.actor.state_dict(),
+        save_robomimic_policy_checkpoint(
+            self.policy,
+            self.ckpt_dict,
+            save_path,
+            rl_state={
                 "value_net": self.value_net.state_dict(),
                 "step": step,
                 "stats": stats,
                 "args": vars(self.args),
             },
-            save_path,
         )
-        print(f"saved {save_path}")
 
     def maybe_update(self):
         args = self.args

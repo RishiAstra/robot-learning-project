@@ -3,6 +3,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
+PYTHON_BIN="${PYTHON_BIN:-$HOME/.conda/envs/mimicgen/bin/python}"
 ENV_NAME="${1:-Lift}"
 TOTAL_STEPS="${2:-5000}"
 EVAL_INTERVAL="${3:-1000}"
@@ -11,7 +12,7 @@ OUT_DIR="${5:-$PROJECT_ROOT/tmp_runs/robosuite_smoke}"
 
 mkdir -p "$OUT_DIR"
 
-python "$PROJECT_ROOT/validate_sac_robosuite.py" \
+"$PYTHON_BIN" "$PROJECT_ROOT/validate_sac_robosuite.py" \
     --env "$ENV_NAME" \
     --total-steps "$TOTAL_STEPS" \
     --eval-interval "$EVAL_INTERVAL" \
