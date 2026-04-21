@@ -8,12 +8,12 @@ CKPT="${1:-$WORKSPACE_ROOT/mimicgen/datasets/core_training_results_quick/bc_rnn_
 TOTAL_STEPS="${2:-2000}"
 EVAL_INTERVAL="${3:-1000}"
 EVAL_EPISODES="${4:-5}"
-OUT_DIR="${5:-$PROJECT_ROOT/tmp_runs/dapg}"
+OUT_DIR="${5:-$PROJECT_ROOT/tmp_runs/ppo_dapg}"
 
 mkdir -p "$OUT_DIR"
 
 "$PYTHON_BIN" "$PROJECT_ROOT/train_rl.py" \
-    --method sac_dapg \
+    --method ppo_dapg \
     --ckpt-path "$CKPT" \
     --total-steps "$TOTAL_STEPS" \
     --eval-interval "$EVAL_INTERVAL" \

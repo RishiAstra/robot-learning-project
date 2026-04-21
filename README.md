@@ -3,7 +3,7 @@
 This repo contains the RL side of the project:
 
 - `rl/` holds the actual SAC fine-tuning implementation.
-- `train_rl.py` is the main entrypoint for SAC-DAPG / SAC-finetune runs.
+- `train_rl.py` is the main entrypoint for SAC and PPO fine-tuning runs.
 - `evaluate_checkpoints.py` evaluates a robomimic checkpoint on its environment.
 - `validate_sac_robosuite.py` is a standalone robosuite SAC sanity check.
 - `clean_sac.py` and `sac_finetune.py` are earlier experiment variants that I kept around for reference.
@@ -30,7 +30,8 @@ The lower-level logic is split like this:
 - `rl/actor.py` handles observation encoding and per-step policy sampling.
 - `rl/replay.py` handles sequence replay and demo loading from HDF5.
 - `rl/sac.py` implements the twin-Q SAC update and the BC-regularized variant.
-- `rl/evaluation.py` runs deterministic rollouts and reports success rate / return.
+- `rl/ppo.py` implements the PPO value head, rollout buffer, and PPO/DAPG update.
+- `rl/evaluation.py` uses robomimic's rollout helper so evaluation matches checkpoint validation more closely.
 - `rl/trainer.py` wires everything together into the training loop.
 
 ## Helper Scripts
@@ -39,6 +40,9 @@ The `scripts/` directory contains thin wrappers that set the environment variabl
 
 - `scripts/eval_bc_checkpoint.sh`
 - `scripts/run_dapg.sh`
+- `scripts/run_ppo.sh`
+- `scripts/run_ppo_dapg.sh`
+- `scripts/download_threading_core.sh`
 - `scripts/run_robosuite_smoke.sh`
 
 ## Running It
@@ -48,8 +52,10 @@ From this repo root:
 ```bash
 scripts/eval_bc_checkpoint.sh <checkpoint-path>
 scripts/run_dapg.sh <checkpoint-path>
+scripts/run_ppo.sh <checkpoint-path>
+scripts/run_ppo_dapg.sh <checkpoint-path>
+scripts/download_threading_core.sh
 scripts/run_robosuite_smoke.sh Lift
 ```
 
 If you want to run the Python entrypoints directly, make sure `PYTHONPATH` includes this repo and the sibling repos, and set `NUMBA_DISABLE_JIT=1` in this workspace.
-

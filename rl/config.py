@@ -27,6 +27,7 @@ class Args:
     actor_lr: float
     critic_lr: float
     alpha_lr: float
+    value_lr: float
     gamma: float
     tau: float
     update_every: int
@@ -34,6 +35,12 @@ class Args:
     eval_interval: int
     eval_episodes: int
     max_ep_len: int
+    rollout_batch_steps: int
+    ppo_epochs: int
+    ppo_clip_coef: float
+    value_coef: float
+    entropy_coef: float
+    gae_lambda: float
     actor_bc_weight: float
     actor_bc_decay: float
     output_dir: str
@@ -41,7 +48,7 @@ class Args:
 
 def parse_args() -> Args:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--method", choices=["sac_bc_init", "sac_dapg", "sac_fd"], required=True)
+    parser.add_argument("--method", choices=["sac_bc_init", "sac_dapg", "sac_fd", "ppo", "ppo_dapg"], required=True)
     parser.add_argument("--ckpt-path", default=str(DEFAULT_CKPT))
     parser.add_argument("--total-steps", type=int, default=20_000)
     parser.add_argument("--seed", type=int, default=101)
@@ -55,6 +62,7 @@ def parse_args() -> Args:
     parser.add_argument("--actor-lr", type=float, default=3e-5)
     parser.add_argument("--critic-lr", type=float, default=3e-4)
     parser.add_argument("--alpha-lr", type=float, default=3e-4)
+    parser.add_argument("--value-lr", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--update-every", type=int, default=10)
@@ -62,6 +70,12 @@ def parse_args() -> Args:
     parser.add_argument("--eval-interval", type=int, default=2000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--max-ep-len", type=int, default=400)
+    parser.add_argument("--rollout-batch-steps", type=int, default=1024)
+    parser.add_argument("--ppo-epochs", type=int, default=4)
+    parser.add_argument("--ppo-clip-coef", type=float, default=0.2)
+    parser.add_argument("--value-coef", type=float, default=0.5)
+    parser.add_argument("--entropy-coef", type=float, default=0.0)
+    parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--actor-bc-weight", type=float, default=5.0)
     parser.add_argument("--actor-bc-decay", type=float, default=0.999)
     parser.add_argument("--output-dir", default=str(SCRIPT_DIR / "rl_runs"))
@@ -81,6 +95,7 @@ def parse_args() -> Args:
         actor_lr=ns.actor_lr,
         critic_lr=ns.critic_lr,
         alpha_lr=ns.alpha_lr,
+        value_lr=ns.value_lr,
         gamma=ns.gamma,
         tau=ns.tau,
         update_every=ns.update_every,
@@ -88,6 +103,12 @@ def parse_args() -> Args:
         eval_interval=ns.eval_interval,
         eval_episodes=ns.eval_episodes,
         max_ep_len=ns.max_ep_len,
+        rollout_batch_steps=ns.rollout_batch_steps,
+        ppo_epochs=ns.ppo_epochs,
+        ppo_clip_coef=ns.ppo_clip_coef,
+        value_coef=ns.value_coef,
+        entropy_coef=ns.entropy_coef,
+        gae_lambda=ns.gae_lambda,
         actor_bc_weight=ns.actor_bc_weight,
         actor_bc_decay=ns.actor_bc_decay,
         output_dir=ns.output_dir,

@@ -1,40 +1,31 @@
 from __future__ import annotations
 
 import numpy as np
-import torch
 
-from rl.actor import sample_actor_step
-from rl.common import filter_obs
+from robomimic.scripts.run_trained_agent import rollout
 
 
-@torch.no_grad()
-def evaluate_actor(actor, env, obs_keys, n_episodes: int, max_ep_len: int):
-    successes = 0
-    horizons = []
-    returns = []
+def evaluate_policy(policy, env, n_episodes: int, max_ep_len: int):
+    rollout_stats = []
     for _ in range(n_episodes):
-        obs = filter_obs(env.reset(), obs_keys)
-        rnn_state = None
-        total_reward = 0.0
-        for t in range(max_ep_len):
-            action, rnn_state = sample_actor_step(actor, obs, rnn_state=rnn_state, deterministic=True)
-            next_obs, _, done, _ = env.step(action)
-            success = env.is_success()["task"]
-            reward = float(success)
-            total_reward += reward
-            obs = filter_obs(next_obs, obs_keys)
-            if done or success:
-                successes += int(success)
-                horizons.append(t + 1)
-                returns.append(total_reward)
-                break
-        else:
-            horizons.append(max_ep_len)
-            returns.append(total_reward)
+        stats, _ = rollout(
+            policy=policy,
+            env=env,
+            horizon=max_ep_len,
+            render=False,
+            video_writer=None,
+            video_skip=5,
+            return_obs=False,
+            camera_names=["agentview"],
+        )
+        rollout_stats.append(stats)
+
+    success_rates = [stats["Success_Rate"] for stats in rollout_stats]
+    returns = [stats["Return"] for stats in rollout_stats]
+    horizons = [stats["Horizon"] for stats in rollout_stats]
     return {
-        "Success_Rate": successes / n_episodes,
+        "Success_Rate": float(np.mean(success_rates)),
         "Return": float(np.mean(returns)),
         "Horizon": float(np.mean(horizons)),
-        "Num_Success": float(successes),
+        "Num_Success": float(np.sum(success_rates)),
     }
-
