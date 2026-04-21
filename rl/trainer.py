@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import os
 import time
 from pathlib import Path
@@ -14,7 +13,6 @@ import robomimic.utils.torch_utils as TorchUtils
 
 from rl.actor import infer_feature_dim, sample_actor_step, sample_actor_step_with_log_prob
 from rl.common import filter_obs, set_seed
-from rl.evaluation import evaluate_policy
 from rl.replay import SequenceReplayBuffer, cat_batches, load_demo_sequences
 from rl.ppo import RolloutEpisodeBuffer, ValueHead, ppo_update
 from rl.sac import TwinQNetwork, sac_update
@@ -29,6 +27,10 @@ def save_robomimic_policy_checkpoint(policy, ckpt_dict, save_path: Path, rl_stat
     updated_ckpt["rl_state"] = rl_state
     torch.save(updated_ckpt, save_path)
     print(f"saved {save_path}")
+
+
+def _state_step(ckpt_dict: dict) -> int:
+    return int(ckpt_dict.get("rl_state", {}).get("step", 0))
 
 
 class SACTrainer:
@@ -49,15 +51,13 @@ class SACTrainer:
 
         self.actor = self.policy.policy.nets["policy"]
         self.actor.train()
+        self.actor_target = copy.deepcopy(self.actor).to(self.device)
+        self.actor_target.train()
+        for param in self.actor_target.parameters():
+            param.requires_grad_(False)
         self.rnn_horizon = int(getattr(self.config.algo.rnn, "horizon", 1)) if hasattr(self.config.algo, "rnn") else 1
 
         self.env = EnvUtils.create_env_from_metadata(
-            self.ckpt_dict["env_metadata"],
-            render=False,
-            render_offscreen=False,
-            use_image_obs=False,
-        )
-        self.eval_env = EnvUtils.create_env_from_metadata(
             self.ckpt_dict["env_metadata"],
             render=False,
             render_offscreen=False,
@@ -75,6 +75,8 @@ class SACTrainer:
         self.log_alpha = torch.tensor(0.0, requires_grad=True, device=self.device)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=args.alpha_lr)
         self.target_entropy = -float(action_dim)
+        self.start_step = _state_step(self.ckpt_dict)
+        self._load_rl_state()
 
         self.seq_len = args.burnin_len + args.learn_len
         self.online_replay = SequenceReplayBuffer(args.online_buffer_capacity, self.seq_len, self.obs_keys)
@@ -85,6 +87,24 @@ class SACTrainer:
 
         self.output_dir = Path(args.output_dir).expanduser().resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _load_rl_state(self) -> None:
+        rl_state = self.ckpt_dict.get("rl_state")
+        if not rl_state:
+            return
+
+        if "critic" in rl_state:
+            self.critic.load_state_dict(rl_state["critic"])
+        if "critic_target" in rl_state:
+            self.critic_target.load_state_dict(rl_state["critic_target"])
+        if "actor_target" in rl_state:
+            self.actor_target.load_state_dict(rl_state["actor_target"])
+        else:
+            self.actor_target.load_state_dict(self.actor.state_dict())
+        if "log_alpha" in rl_state:
+            self.log_alpha.data.copy_(rl_state["log_alpha"].to(self.device))
+
+        print(f"resumed SAC rl_state from step {self.start_step}")
 
     def select_update_batches(self):
         args = self.args
@@ -119,6 +139,7 @@ class SACTrainer:
             bc_weight *= args.actor_bc_decay ** step
         return sac_update(
             actor=self.actor,
+            actor_target=self.actor_target,
             critic=self.critic,
             critic_target=self.critic_target,
             batch=batch,
@@ -134,36 +155,29 @@ class SACTrainer:
             bc_batch=bc_batch,
         )
 
-    def save_best(self, step: int, stats):
-        save_path = self.output_dir / f"{self.args.method}_best.pth"
+    def save_checkpoint(self, step: int, stats):
+        save_path = self.output_dir / f"{self.args.method}_step_{step:06d}.pth"
         save_robomimic_policy_checkpoint(
-            self.policy,
-            self.ckpt_dict,
-            save_path,
+            self.policy, self.ckpt_dict, save_path,
             rl_state={
                 "critic": self.critic.state_dict(),
                 "critic_target": self.critic_target.state_dict(),
+                "actor_target": self.actor_target.state_dict(),
                 "log_alpha": self.log_alpha.detach().cpu(),
-                "step": step,
-                "stats": stats,
-                "args": vars(self.args),
+                "step": step, "stats": stats, "args": vars(self.args),
             },
         )
 
     def train(self):
         args = self.args
-        baseline = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
-        print("BC baseline")
-        print(json.dumps(baseline, indent=4))
 
         obs = filter_obs(self.env.reset(), self.obs_keys)
         rollout_state = None
         rollout_rnn_steps = 0
         ep_len = 0
-        best_success = baseline["Success_Rate"]
         start_time = time.time()
 
-        for step in range(args.total_steps):
+        for step in range(self.start_step, args.total_steps):
             if rollout_rnn_steps % self.rnn_horizon == 0:
                 rollout_state = None
             action, rollout_state = sample_actor_step(self.actor, obs, rnn_state=rollout_state, deterministic=False)
@@ -190,22 +204,16 @@ class SACTrainer:
                 print(
                     f"step={step} method={args.method} "
                     f"critic={logs['critic_loss']:.3f} actor={logs['actor_loss']:.3f} "
-                    f"rl={logs['rl_loss']:.3f} bc={logs['bc_loss']:.3f} alpha={logs['alpha']:.4f}"
+                    f"rl={logs['rl_loss']:.3f} bc={logs['bc_loss']:.3f} "
+                    f"bc_w={logs['bc_weight']:.4f} alpha={logs['alpha']:.4f}"
                 )
 
-            if step > 0 and step % args.eval_interval == 0:
-                stats = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
-                print(f"eval@{step}")
-                print(json.dumps(stats, indent=4))
-                if stats["Success_Rate"] > best_success:
-                    best_success = stats["Success_Rate"]
-                    self.save_best(step, stats)
+            if step > self.start_step and step % args.checkpoint_interval == 0:
+                self.save_checkpoint(step, stats={})
 
-        final_stats = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
-        print("final")
-        print(json.dumps(final_stats, indent=4))
+        self.save_checkpoint(args.total_steps, stats={})
         print(f"elapsed_sec={time.time() - start_time:.1f}")
-        return final_stats
+        return {}
 
 
 class PPOTrainer:
@@ -234,17 +242,13 @@ class PPOTrainer:
             render_offscreen=False,
             use_image_obs=False,
         )
-        self.eval_env = EnvUtils.create_env_from_metadata(
-            self.ckpt_dict["env_metadata"],
-            render=False,
-            render_offscreen=False,
-            use_image_obs=False,
-        )
         obs_feat_dim = infer_feature_dim(self.actor, self.obs_keys, self.env, self.device)
         self.value_net = ValueHead(obs_feat_dim, layer_norm=args.critic_layer_norm).to(self.device)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=args.actor_lr)
         self.value_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=args.value_lr)
+        self.start_step = _state_step(self.ckpt_dict)
+        self._load_rl_state()
 
         self.rollout_buffer = RolloutEpisodeBuffer()
         self.demo_replay = SequenceReplayBuffer(
@@ -259,18 +263,21 @@ class PPOTrainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.env_steps = 0
 
-    def save_best(self, step: int, stats):
-        save_path = self.output_dir / f"{self.args.method}_best.pth"
+    def _load_rl_state(self) -> None:
+        rl_state = self.ckpt_dict.get("rl_state")
+        if not rl_state:
+            return
+
+        if "value_net" in rl_state:
+            self.value_net.load_state_dict(rl_state["value_net"])
+
+        print(f"resumed PPO rl_state from step {self.start_step}")
+
+    def save_checkpoint(self, step: int, stats):
+        save_path = self.output_dir / f"{self.args.method}_step_{step:06d}.pth"
         save_robomimic_policy_checkpoint(
-            self.policy,
-            self.ckpt_dict,
-            save_path,
-            rl_state={
-                "value_net": self.value_net.state_dict(),
-                "step": step,
-                "stats": stats,
-                "args": vars(self.args),
-            },
+            self.policy, self.ckpt_dict, save_path,
+            rl_state={"value_net": self.value_net.state_dict(), "step": step, "stats": stats, "args": vars(self.args)},
         )
 
     def maybe_update(self):
@@ -313,18 +320,14 @@ class PPOTrainer:
 
     def train(self):
         args = self.args
-        baseline = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
-        print("BC baseline")
-        print(json.dumps(baseline, indent=4))
 
         obs = filter_obs(self.env.reset(), self.obs_keys)
         rollout_state = None
         rollout_rnn_steps = 0
         ep_len = 0
-        best_success = baseline["Success_Rate"]
         start_time = time.time()
 
-        for step in range(args.total_steps):
+        for step in range(self.start_step, args.total_steps):
             if rollout_rnn_steps % self.rnn_horizon == 0:
                 rollout_state = None
             action, log_prob, rollout_state = sample_actor_step_with_log_prob(
@@ -367,13 +370,8 @@ class PPOTrainer:
                         f"bc={logs['bc_loss']:.3f} kl={logs['approx_kl']:.4f} clip={logs['clip_fraction']:.3f}"
                     )
 
-            if step > 0 and step % args.eval_interval == 0:
-                stats = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
-                print(f"eval@{step}")
-                print(json.dumps(stats, indent=4))
-                if stats["Success_Rate"] > best_success:
-                    best_success = stats["Success_Rate"]
-                    self.save_best(step, stats)
+            if step > self.start_step and step % args.checkpoint_interval == 0:
+                self.save_checkpoint(step, stats={})
 
         self.rollout_buffer.flush_episode()
         if len(self.rollout_buffer) > 0:
@@ -385,8 +383,5 @@ class PPOTrainer:
                     f"bc={logs['bc_loss']:.3f} kl={logs['approx_kl']:.4f} clip={logs['clip_fraction']:.3f}"
                 )
 
-        final_stats = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
-        print("final")
-        print(json.dumps(final_stats, indent=4))
+        self.save_checkpoint(args.total_steps, stats={})
         print(f"elapsed_sec={time.time() - start_time:.1f}")
-        return final_stats

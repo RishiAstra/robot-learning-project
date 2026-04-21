@@ -37,6 +37,7 @@ class TwinQNetwork(nn.Module):
 
 def sac_update(
     actor,
+    actor_target,
     critic,
     critic_target,
     batch,
@@ -59,13 +60,14 @@ def sac_update(
     rewards_learn = rewards[:, burnin_len:]
     dones_learn = dones[:, burnin_len:]
     alpha = log_alpha.exp().detach()
+    target_actor = actor_target if actor_target is not None else actor
 
     with torch.no_grad():
-        next_dist = actor_forward_with_burnin(actor, next_obs, burnin_len)
+        next_dist = actor_forward_with_burnin(target_actor, next_obs, burnin_len)
         next_action, next_logp = gmm_rsample_with_log_prob(next_dist)
         next_logp = next_logp.clamp(-20, 2)
         next_obs_learn = {k: v[:, burnin_len:] for k, v in next_obs.items()}
-        next_feat = encode_obs_sequence(actor, next_obs_learn, detach=True)
+        next_feat = encode_obs_sequence(target_actor, next_obs_learn, detach=True)
         q1_next, q2_next = critic_target(next_feat, next_action)
         q_target = rewards_learn + gamma * (1.0 - dones_learn) * (torch.min(q1_next, q2_next) - alpha * next_logp)
 
@@ -110,12 +112,16 @@ def sac_update(
     for p, p_t in zip(critic.parameters(), critic_target.parameters()):
         p_t.data.copy_(tau * p.data + (1.0 - tau) * p_t.data)
 
+    if actor_target is not None:
+        for p, p_t in zip(actor.parameters(), actor_target.parameters()):
+            p_t.data.copy_(tau * p.data + (1.0 - tau) * p_t.data)
+
     return {
         "critic_loss": float(critic_loss.item()),
         "actor_loss": float(actor_loss.item()),
         "rl_loss": float(rl_loss.item()),
         "bc_loss": float(bc_loss.item()),
+        "bc_weight": float(bc_weight),
         "alpha": float(log_alpha.exp().item()),
         "mean_q": float(q1.mean().item()),
     }
-

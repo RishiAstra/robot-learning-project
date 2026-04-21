@@ -110,6 +110,24 @@ def _sequence_log_probs(actor, obs, actions, lengths, rnn_horizon: int):
     return log_probs
 
 
+def _sequence_sampled_entropy(actor, obs, lengths, rnn_horizon: int):
+    sample_value = next(iter(obs.values()))
+    batch_size, max_len = sample_value.shape[:2]
+    entropy = torch.zeros((batch_size, max_len), device=sample_value.device, dtype=torch.float32)
+
+    for start in range(0, max_len, rnn_horizon):
+        end = min(start + rnn_horizon, max_len)
+        chunk_obs = {k: v[:, start:end] for k, v in obs.items()}
+        chunk_dist = actor.forward_train(chunk_obs, rnn_init_state=None, return_state=False)
+        with torch.no_grad():
+            sampled_actions = chunk_dist.sample()
+        chunk_entropy = -chunk_dist.log_prob(sampled_actions)
+        valid = (lengths > start).float().unsqueeze(1)
+        entropy[:, start:end] = chunk_entropy * valid
+
+    return entropy
+
+
 def _compute_gae(episodes: Sequence[Sequence[dict]], gamma: float, gae_lambda: float):
     advantages = []
     returns = []
@@ -226,7 +244,11 @@ def ppo_update(
         raw_value_loss = 0.5 * (torch.maximum(value_loss_unclipped, value_loss_clipped) * mask).sum() / valid_count
         value_loss = value_coef * raw_value_loss
 
-        entropy = -(new_log_probs * mask).sum() / valid_count
+        if entropy_coef != 0.0:
+            entropy_values = _sequence_sampled_entropy(actor, obs, batch["lengths"], rnn_horizon=rnn_horizon)
+            entropy = (entropy_values * mask).sum() / valid_count
+        else:
+            entropy = torch.tensor(0.0, device=device)
         total_actor_loss = policy_loss - entropy_coef * entropy
 
         bc_loss = torch.tensor(0.0, device=device)

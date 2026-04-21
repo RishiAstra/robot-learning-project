@@ -23,7 +23,7 @@ The main training path is:
 3. Build a replay buffer that stores short observation/action sequences.
 4. Seed the buffer from demonstration data in the MimicGen dataset.
 5. Run SAC updates with a BC regularizer on demo batches for DAPG-style finetuning.
-6. Periodically evaluate the current policy in the original robosuite environment.
+6. Periodically save checkpoints for separate evaluation.
 
 The lower-level logic is split like this:
 

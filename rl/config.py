@@ -32,8 +32,7 @@ class Args:
     tau: float
     update_every: int
     warmup_steps: int
-    eval_interval: int
-    eval_episodes: int
+    checkpoint_interval: int
     max_ep_len: int
     rollout_batch_steps: int
     ppo_epochs: int
@@ -68,17 +67,16 @@ def parse_args() -> Args:
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--update-every", type=int, default=10)
     parser.add_argument("--warmup-steps", type=int, default=1000)
-    parser.add_argument("--eval-interval", type=int, default=2000)
-    parser.add_argument("--eval-episodes", type=int, default=20)
+    parser.add_argument("--checkpoint-interval", type=int, default=2000)
     parser.add_argument("--max-ep-len", type=int, default=400)
     parser.add_argument("--rollout-batch-steps", type=int, default=1024)
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--ppo-clip-coef", type=float, default=0.2)
     parser.add_argument("--value-coef", type=float, default=0.5)
-    parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--entropy-coef", type=float, default=0.0)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--actor-bc-weight", type=float, default=5.0)
-    parser.add_argument("--actor-bc-decay", type=float, default=0.9999)
+    parser.add_argument("--actor-bc-weight", type=float, default=0.5)
+    parser.add_argument("--actor-bc-decay", type=float, default=0.99995)
     parser.add_argument("--critic-layer-norm", action="store_true", default=False)
     parser.add_argument("--output-dir", default=str(SCRIPT_DIR / "rl_runs"))
     ns = parser.parse_args()
@@ -102,8 +100,7 @@ def parse_args() -> Args:
         tau=ns.tau,
         update_every=ns.update_every,
         warmup_steps=ns.warmup_steps,
-        eval_interval=ns.eval_interval,
-        eval_episodes=ns.eval_episodes,
+        checkpoint_interval=ns.checkpoint_interval,
         max_ep_len=ns.max_ep_len,
         rollout_batch_steps=ns.rollout_batch_steps,
         ppo_epochs=ns.ppo_epochs,

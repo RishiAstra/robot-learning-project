@@ -36,16 +36,24 @@ class SequenceReplayBuffer:
             return
         self.storage.append(sequence)
 
+    def add_sequences_from_episode(self, episode: List[dict], stride: int) -> None:
+        if len(episode) < self.seq_len:
+            return
+
+        starts = list(range(0, len(episode) - self.seq_len + 1, stride))
+        tail_start = len(episode) - self.seq_len
+        if starts[-1] != tail_start:
+            starts.append(tail_start)
+
+        for start in starts:
+            self.add_sequence(episode[start : start + self.seq_len])
+
     def flush_episode(self, stride: Optional[int] = None):
         # Default stride = seq_len so sequences align with RNN reset boundaries.
-        # Using seq_len // 2 would produce sequences that span resets, giving the
-        # burnin the wrong RNN context for half the training data.
+        # Always include the final window so sparse terminal rewards / success
+        # flags are not silently dropped.
         stride = stride if stride is not None else self.seq_len
-        episode = self._current_episode
-        for start in range(0, max(1, len(episode) - self.seq_len + 1), stride):
-            seq = episode[start : start + self.seq_len]
-            if len(seq) == self.seq_len:
-                self.add_sequence(seq)
+        self.add_sequences_from_episode(self._current_episode, stride)
         self._current_episode = []
 
     def sample(self, batch_size: int, device: torch.device):
@@ -110,10 +118,7 @@ def load_demo_sequences(
                 )
 
             stride = max(1, replay.seq_len // 2)
-            for start in range(0, max(1, len(steps) - replay.seq_len + 1), stride):
-                seq = steps[start : start + replay.seq_len]
-                if len(seq) == replay.seq_len:
-                    replay.add_sequence(seq)
+            replay.add_sequences_from_episode(steps, stride)
 
 
 def cat_batches(batch_a, batch_b):
