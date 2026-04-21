@@ -13,15 +13,18 @@ from rl.actor import encode_obs_sequence
 
 
 class ValueHead(nn.Module):
-    def __init__(self, obs_feat_dim: int, hidden_dim: int = 256):
+    def __init__(self, obs_feat_dim: int, hidden_dim: int = 256, layer_norm: bool = False):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(obs_feat_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, 1),
-        )
+        layers: list = [nn.Linear(obs_feat_dim, hidden_dim)]
+        if layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.Tanh())
+        layers.append(nn.Linear(hidden_dim, hidden_dim))
+        if layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.Tanh())
+        layers.append(nn.Linear(hidden_dim, 1))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, obs_feat: torch.Tensor):
         return self.net(obs_feat).squeeze(-1)

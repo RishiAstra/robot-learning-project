@@ -9,19 +9,26 @@ from rl.common import gmm_rsample_with_log_prob
 
 
 class TwinQNetwork(nn.Module):
-    def __init__(self, obs_feat_dim: int, action_dim: int, hidden_dim: int = 512):
+    def __init__(self, obs_feat_dim: int, action_dim: int, hidden_dim: int = 512, layer_norm: bool = False):
         super().__init__()
         in_dim = obs_feat_dim + action_dim
-        self.q1 = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
-        self.q2 = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
+        self.q1 = self._build_q(in_dim, hidden_dim, layer_norm)
+        self.q2 = self._build_q(in_dim, hidden_dim, layer_norm)
+
+    @staticmethod
+    def _build_q(in_dim: int, hidden_dim: int, layer_norm: bool) -> nn.Sequential:
+        # RLPD-style: LayerNorm after each Linear and before activation keeps
+        # Q-values from exploding when mixing demo and online data.
+        layers: list = [nn.Linear(in_dim, hidden_dim)]
+        if layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim, hidden_dim))
+        if layer_norm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim, 1))
+        return nn.Sequential(*layers)
 
     def forward(self, obs_feat: torch.Tensor, action: torch.Tensor):
         x = torch.cat([obs_feat, action], dim=-1)

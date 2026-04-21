@@ -43,6 +43,7 @@ class Args:
     gae_lambda: float
     actor_bc_weight: float
     actor_bc_decay: float
+    critic_layer_norm: bool
     output_dir: str
 
 
@@ -78,6 +79,7 @@ def parse_args() -> Args:
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--actor-bc-weight", type=float, default=5.0)
     parser.add_argument("--actor-bc-decay", type=float, default=0.9999)
+    parser.add_argument("--critic-layer-norm", action="store_true", default=False)
     parser.add_argument("--output-dir", default=str(SCRIPT_DIR / "rl_runs"))
     ns = parser.parse_args()
     return Args(
@@ -111,5 +113,6 @@ def parse_args() -> Args:
         gae_lambda=ns.gae_lambda,
         actor_bc_weight=ns.actor_bc_weight,
         actor_bc_decay=ns.actor_bc_decay,
+        critic_layer_norm=ns.critic_layer_norm,
         output_dir=ns.output_dir,
     )

@@ -65,7 +65,7 @@ class SACTrainer:
         )
         obs_feat_dim = infer_feature_dim(self.actor, self.obs_keys, self.env, self.device)
         action_dim = int(self.env.action_dimension)
-        self.critic = TwinQNetwork(obs_feat_dim, action_dim=action_dim).to(self.device)
+        self.critic = TwinQNetwork(obs_feat_dim, action_dim=action_dim, layer_norm=args.critic_layer_norm).to(self.device)
         self.critic_target = copy.deepcopy(self.critic).to(self.device)
         for param in self.critic_target.parameters():
             param.requires_grad_(False)
@@ -241,7 +241,7 @@ class PPOTrainer:
             use_image_obs=False,
         )
         obs_feat_dim = infer_feature_dim(self.actor, self.obs_keys, self.env, self.device)
-        self.value_net = ValueHead(obs_feat_dim).to(self.device)
+        self.value_net = ValueHead(obs_feat_dim, layer_norm=args.critic_layer_norm).to(self.device)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=args.actor_lr)
         self.value_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=args.value_lr)
