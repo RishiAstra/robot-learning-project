@@ -43,10 +43,12 @@ class SACTrainer:
         self.actor = self.policy.policy.nets["policy"]
         self.actor.train()
 
+        self.final_output_video = True
+
         self.env = EnvUtils.create_env_from_metadata(
             self.ckpt_dict["env_metadata"],
             render=False,
-            render_offscreen=True,
+            render_offscreen=self.final_output_video,
             use_image_obs=False,
         )
         obs_feat_dim = infer_feature_dim(self.actor, self.obs_keys, self.env, self.device)
@@ -156,7 +158,7 @@ class SACTrainer:
 
         stats_path = self.output_dir / f"{method}_final_stats.json"
         with open(stats_path, "w") as f:
-            json.dump({"step": step, "eval_episodes": FINAL_EVAL_EPISODES, **stats}, f, indent=4)
+            json.dump({"step": step, "eval_episodes": FINAL_EVAL_EPISODES, "bc_baseline_success": self.baseline["Success_Rate"], **stats}, f, indent=4)
         print(f"saved final stats → {stats_path}")
 
     def train(self):
@@ -164,6 +166,7 @@ class SACTrainer:
         baseline = evaluate_actor(self.actor, self.env, self.obs_keys, args.eval_episodes, args.max_ep_len)
         print("BC baseline")
         print(json.dumps(baseline, indent=4))
+        self.baseline = baseline
 
         obs = filter_obs(self.env.reset(), self.obs_keys)
         rollout_state = None
@@ -205,7 +208,7 @@ class SACTrainer:
                     best_success = stats["Success_Rate"]
                     self.save_best(step, stats)
 
-        video_dir = str(self.output_dir / "videos")
+        video_dir = str(self.output_dir / "videos") if self.final_output_video else None
         final_stats = evaluate_actor(
             self.actor, self.env, self.obs_keys, FINAL_EVAL_EPISODES, args.max_ep_len, video_dir
         )

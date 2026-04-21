@@ -5,6 +5,7 @@ import os
 import imageio
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from rl.actor import sample_actor_step
 from rl.common import filter_obs
@@ -17,7 +18,7 @@ def evaluate_actor(actor, env, obs_keys, n_episodes: int, max_ep_len: int, video
     successes = 0
     horizons = []
     returns = []
-    for ep in range(n_episodes):
+    for ep in tqdm(range(n_episodes), desc="eval", unit="ep"):
         obs = filter_obs(env.reset(), obs_keys)
         rnn_state = None
         total_reward = 0.0
