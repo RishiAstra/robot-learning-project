@@ -49,6 +49,12 @@ class SACTrainer:
             render_offscreen=False,
             use_image_obs=False,
         )
+        self.eval_env = EnvUtils.create_env_from_metadata(
+            self.ckpt_dict["env_metadata"],
+            render=False,
+            render_offscreen=False,
+            use_image_obs=False,
+        )
         obs_feat_dim = infer_feature_dim(self.actor, self.obs_keys, self.env, self.device)
         action_dim = int(self.env.action_dimension)
         self.critic = TwinQNetwork(obs_feat_dim, action_dim=action_dim).to(self.device)
@@ -58,7 +64,7 @@ class SACTrainer:
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=args.actor_lr)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=args.critic_lr)
-        self.log_alpha = torch.tensor(-4.0, requires_grad=True, device=self.device)
+        self.log_alpha = torch.tensor(0.0, requires_grad=True, device=self.device)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=args.alpha_lr)
         self.target_entropy = -float(action_dim)
 
@@ -87,8 +93,10 @@ class SACTrainer:
         online_batch = self.online_replay.sample(n_online, self.device)
         demo_batch = self.demo_replay.sample(n_demo, self.device)
         train_batch = cat_batches(online_batch, demo_batch) if args.method == "sac_fd" else online_batch
-        bc_batch = demo_batch if args.method == "sac_dapg" else None
-        bc_weight = args.actor_bc_weight if args.method == "sac_dapg" else 0.0
+        # sac_fd (DDPGfD-style) mixes demos into the critic batch AND adds a
+        # BC actor loss, matching the original DDPGfD actor regularization.
+        bc_batch = demo_batch if args.method in ("sac_dapg", "sac_fd") else None
+        bc_weight = args.actor_bc_weight if args.method in ("sac_dapg", "sac_fd") else 0.0
         return train_batch, bc_batch, bc_weight
 
     def maybe_update(self, step: int):
@@ -134,7 +142,7 @@ class SACTrainer:
 
     def train(self):
         args = self.args
-        baseline = evaluate_policy(self.policy, self.env, args.eval_episodes, args.max_ep_len)
+        baseline = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
         print("BC baseline")
         print(json.dumps(baseline, indent=4))
 
@@ -176,14 +184,14 @@ class SACTrainer:
                 )
 
             if step > 0 and step % args.eval_interval == 0:
-                stats = evaluate_policy(self.policy, self.env, args.eval_episodes, args.max_ep_len)
+                stats = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
                 print(f"eval@{step}")
                 print(json.dumps(stats, indent=4))
                 if stats["Success_Rate"] > best_success:
                     best_success = stats["Success_Rate"]
                     self.save_best(step, stats)
 
-        final_stats = evaluate_policy(self.policy, self.env, args.eval_episodes, args.max_ep_len)
+        final_stats = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
         print("final")
         print(json.dumps(final_stats, indent=4))
         print(f"elapsed_sec={time.time() - start_time:.1f}")
@@ -211,6 +219,12 @@ class PPOTrainer:
         self.rnn_horizon = int(getattr(self.config.algo.rnn, "horizon", 1)) if hasattr(self.config.algo, "rnn") else 1
 
         self.env = EnvUtils.create_env_from_metadata(
+            self.ckpt_dict["env_metadata"],
+            render=False,
+            render_offscreen=False,
+            use_image_obs=False,
+        )
+        self.eval_env = EnvUtils.create_env_from_metadata(
             self.ckpt_dict["env_metadata"],
             render=False,
             render_offscreen=False,
@@ -289,7 +303,7 @@ class PPOTrainer:
 
     def train(self):
         args = self.args
-        baseline = evaluate_policy(self.policy, self.env, args.eval_episodes, args.max_ep_len)
+        baseline = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
         print("BC baseline")
         print(json.dumps(baseline, indent=4))
 
@@ -344,7 +358,7 @@ class PPOTrainer:
                     )
 
             if step > 0 and step % args.eval_interval == 0:
-                stats = evaluate_policy(self.policy, self.env, args.eval_episodes, args.max_ep_len)
+                stats = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
                 print(f"eval@{step}")
                 print(json.dumps(stats, indent=4))
                 if stats["Success_Rate"] > best_success:
@@ -361,7 +375,7 @@ class PPOTrainer:
                     f"bc={logs['bc_loss']:.3f} kl={logs['approx_kl']:.4f} clip={logs['clip_fraction']:.3f}"
                 )
 
-        final_stats = evaluate_policy(self.policy, self.env, args.eval_episodes, args.max_ep_len)
+        final_stats = evaluate_policy(self.policy, self.eval_env, args.eval_episodes, args.max_ep_len)
         print("final")
         print(json.dumps(final_stats, indent=4))
         print(f"elapsed_sec={time.time() - start_time:.1f}")

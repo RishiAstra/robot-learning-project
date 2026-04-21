@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from collections import deque
 from typing import List, Optional, Sequence
 
 import h5py
@@ -15,7 +16,8 @@ class SequenceReplayBuffer:
         self.capacity = capacity
         self.seq_len = seq_len
         self.obs_keys = list(obs_keys)
-        self.storage: List[List[dict]] = []
+        # deque with maxlen gives O(1) append-and-evict vs O(n) list.pop(0)
+        self.storage: deque = deque(maxlen=capacity)
         self._current_episode: List[dict] = []
 
     def add_step(self, obs, action, reward, next_obs, done):
@@ -32,12 +34,13 @@ class SequenceReplayBuffer:
     def add_sequence(self, sequence: List[dict]):
         if len(sequence) != self.seq_len:
             return
-        if len(self.storage) >= self.capacity:
-            self.storage.pop(0)
         self.storage.append(sequence)
 
     def flush_episode(self, stride: Optional[int] = None):
-        stride = stride or max(1, self.seq_len // 2)
+        # Default stride = seq_len so sequences align with RNN reset boundaries.
+        # Using seq_len // 2 would produce sequences that span resets, giving the
+        # burnin the wrong RNN context for half the training data.
+        stride = stride if stride is not None else self.seq_len
         episode = self._current_episode
         for start in range(0, max(1, len(episode) - self.seq_len + 1), stride):
             seq = episode[start : start + self.seq_len]
@@ -46,7 +49,7 @@ class SequenceReplayBuffer:
         self._current_episode = []
 
     def sample(self, batch_size: int, device: torch.device):
-        sequences = random.sample(self.storage, batch_size)
+        sequences = random.sample(list(self.storage), batch_size)
 
         def stack_scalar(key: str):
             values = [[step[key] for step in seq] for seq in sequences]
@@ -81,18 +84,28 @@ def load_demo_sequences(
         for demo_key in demo_keys:
             demo = dataset["data"][demo_key]
             obs = {k: demo["obs"][k][()] for k in obs_keys}
+            next_obs_group = demo.get("next_obs")
+            next_obs = {k: next_obs_group[k][()] for k in obs_keys} if next_obs_group is not None else None
             actions = demo["actions"][()]
+            rewards = demo["rewards"][()] if "rewards" in demo else None
+            dones = demo["dones"][()] if "dones" in demo else None
             length = actions.shape[0]
             steps = []
             for t in range(length):
                 next_t = min(t + 1, length - 1)
+                terminal = float(dones[t]) if dones is not None else float(t == (length - 1))
+                if t == (length - 1):
+                    terminal = 1.0
                 steps.append(
                     {
                         "obs": {k: obs[k][t] for k in obs_keys},
                         "action": np.asarray(actions[t], dtype=np.float32),
-                        "reward": float(t == (length - 1)),
-                        "next_obs": {k: obs[k][next_t] for k in obs_keys},
-                        "done": float(t == (length - 1)),
+                        "reward": float(rewards[t]) if rewards is not None else float(t == (length - 1)),
+                        "next_obs": {
+                            k: (next_obs[k][t] if next_obs is not None else obs[k][next_t])
+                            for k in obs_keys
+                        },
+                        "done": terminal,
                     }
                 )
 
@@ -115,4 +128,3 @@ def cat_batches(batch_a, batch_b):
         next_obs,
         torch.cat([dones_a, dones_b], dim=0),
     )
-

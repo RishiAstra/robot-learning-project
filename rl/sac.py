@@ -63,7 +63,10 @@ def sac_update(
         q_target = rewards_learn + gamma * (1.0 - dones_learn) * (torch.min(q1_next, q2_next) - alpha * next_logp)
 
     obs_learn = {k: v[:, burnin_len:] for k, v in obs.items()}
-    obs_feat = encode_obs_sequence(actor, obs_learn, detach=True)
+    # Encode once with gradients; detach a view for the critic to avoid
+    # pulling the encoder in two directions simultaneously.
+    obs_feat_actor = encode_obs_sequence(actor, obs_learn, detach=False)
+    obs_feat = obs_feat_actor.detach()
     q1, q2 = critic(obs_feat, actions_learn)
     critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
 
@@ -75,7 +78,7 @@ def sac_update(
     dist = actor_forward_with_burnin(actor, obs, burnin_len)
     action_sample, logp = gmm_rsample_with_log_prob(dist)
     logp = logp.clamp(-20, 2)
-    obs_feat_actor = encode_obs_sequence(actor, obs_learn, detach=False)
+    # Reuse the already-computed actor features (with gradients intact)
     q1_pi, q2_pi = critic(obs_feat_actor, action_sample)
     rl_loss = (alpha * logp - torch.min(q1_pi, q2_pi)).mean()
 

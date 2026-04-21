@@ -74,10 +74,10 @@ def parse_args() -> Args:
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--ppo-clip-coef", type=float, default=0.2)
     parser.add_argument("--value-coef", type=float, default=0.5)
-    parser.add_argument("--entropy-coef", type=float, default=0.0)
+    parser.add_argument("--entropy-coef", type=float, default=0.01)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--actor-bc-weight", type=float, default=5.0)
-    parser.add_argument("--actor-bc-decay", type=float, default=0.999)
+    parser.add_argument("--actor-bc-decay", type=float, default=0.9999)
     parser.add_argument("--output-dir", default=str(SCRIPT_DIR / "rl_runs"))
     ns = parser.parse_args()
     return Args(
