@@ -205,7 +205,6 @@ def ppo_update(
     value_clip_coef: float,
     value_coef: float,
     entropy_coef: float,
-    critic_output_l2_weight: float,
     max_grad_norm: float,
     update_epochs: int,
     demo_batch=None,
@@ -243,8 +242,7 @@ def ppo_update(
         value_loss_unclipped = (value_pred - returns).pow(2)
         value_loss_clipped = (value_pred_clipped - returns).pow(2)
         raw_value_loss = 0.5 * (torch.maximum(value_loss_unclipped, value_loss_clipped) * mask).sum() / valid_count
-        value_output_l2 = ((value_pred.pow(2) * mask).sum() / valid_count)
-        value_loss = value_coef * raw_value_loss + critic_output_l2_weight * value_output_l2
+        value_loss = value_coef * raw_value_loss
 
         if entropy_coef != 0.0:
             entropy_values = _sequence_sampled_entropy(actor, obs, batch["lengths"], rnn_horizon=rnn_horizon)
@@ -280,7 +278,6 @@ def ppo_update(
         stats = {
             "policy_loss": float(policy_loss.item()),
             "value_loss": float(raw_value_loss.item()),
-            "value_output_l2": float(value_output_l2.item()),
             "entropy_loss": float(entropy.item()),
             "bc_loss": float(bc_loss.item()),
             "approx_kl": float((old_log_probs - new_log_probs).masked_select(mask.bool()).mean().item()),

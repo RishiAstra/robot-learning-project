@@ -33,6 +33,25 @@ def _state_step(ckpt_dict: dict) -> int:
     return int(ckpt_dict.get("rl_state", {}).get("step", 0))
 
 
+def _decoupled_decay_param_groups(module: torch.nn.Module, weight_decay: float):
+    decay_params = []
+    no_decay_params = []
+    for name, param in module.named_parameters():
+        if not param.requires_grad:
+            continue
+        if weight_decay > 0.0 and param.ndim > 1 and not name.endswith(".bias"):
+            decay_params.append(param)
+        else:
+            no_decay_params.append(param)
+
+    param_groups = []
+    if decay_params:
+        param_groups.append({"params": decay_params, "weight_decay": weight_decay})
+    if no_decay_params:
+        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
+    return param_groups
+
+
 class SACTrainer:
     def __init__(self, args):
         self.args = args
@@ -71,7 +90,10 @@ class SACTrainer:
             param.requires_grad_(False)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=args.actor_lr)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=args.critic_lr)
+        self.critic_optimizer = torch.optim.AdamW(
+            _decoupled_decay_param_groups(self.critic, args.critic_weight_decay),
+            lr=args.critic_lr,
+        )
         self.log_alpha = torch.tensor(0.0, requires_grad=True, device=self.device)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=args.alpha_lr)
         self.target_entropy = -float(action_dim)
@@ -151,7 +173,6 @@ class SACTrainer:
             burnin_len=args.burnin_len,
             gamma=args.gamma,
             tau=args.tau,
-            critic_output_l2_weight=args.critic_output_l2_weight,
             bc_weight=bc_weight,
             bc_batch=bc_batch,
         )
@@ -205,7 +226,7 @@ class SACTrainer:
                 print(
                     f"step={step} method={args.method} "
                     f"critic={logs['critic_loss']:.3f} actor={logs['actor_loss']:.3f} "
-                    f"td={logs['td_loss']:.3f} q_l2={logs['critic_output_l2']:.3f} "
+                    f"td={logs['td_loss']:.3f} "
                     f"rl={logs['rl_loss']:.3f} bc={logs['bc_loss']:.3f} "
                     f"bc_w={logs['bc_weight']:.4f} alpha={logs['alpha']:.4f}"
                 )
@@ -248,7 +269,10 @@ class PPOTrainer:
         self.value_net = ValueHead(obs_feat_dim, layer_norm=args.critic_layer_norm).to(self.device)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=args.actor_lr)
-        self.value_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=args.value_lr)
+        self.value_optimizer = torch.optim.AdamW(
+            _decoupled_decay_param_groups(self.value_net, args.critic_weight_decay),
+            lr=args.value_lr,
+        )
         self.start_step = _state_step(self.ckpt_dict)
         self._load_rl_state()
 
@@ -309,7 +333,6 @@ class PPOTrainer:
             value_clip_coef=args.ppo_clip_coef,
             value_coef=args.value_coef,
             entropy_coef=args.entropy_coef,
-            critic_output_l2_weight=args.critic_output_l2_weight,
             max_grad_norm=1.0,
             update_epochs=args.ppo_epochs,
             demo_batch=demo_batch,
@@ -370,8 +393,8 @@ class PPOTrainer:
                     print(
                         f"update@{step} method={args.method} "
                         f"policy={logs['policy_loss']:.3f} value={logs['value_loss']:.3f} "
-                        f"v_l2={logs['value_output_l2']:.3f} bc={logs['bc_loss']:.3f} "
-                        f"kl={logs['approx_kl']:.4f} clip={logs['clip_fraction']:.3f}"
+                        f"bc={logs['bc_loss']:.3f} kl={logs['approx_kl']:.4f} "
+                        f"clip={logs['clip_fraction']:.3f}"
                     )
 
             if step > self.start_step and step % args.checkpoint_interval == 0:
@@ -384,8 +407,8 @@ class PPOTrainer:
                 print(
                     f"final_update method={args.method} "
                     f"policy={logs['policy_loss']:.3f} value={logs['value_loss']:.3f} "
-                    f"v_l2={logs['value_output_l2']:.3f} bc={logs['bc_loss']:.3f} "
-                    f"kl={logs['approx_kl']:.4f} clip={logs['clip_fraction']:.3f}"
+                    f"bc={logs['bc_loss']:.3f} kl={logs['approx_kl']:.4f} "
+                    f"clip={logs['clip_fraction']:.3f}"
                 )
 
         self.save_checkpoint(args.total_steps, stats={})
