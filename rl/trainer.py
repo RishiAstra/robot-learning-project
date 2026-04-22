@@ -40,18 +40,14 @@ def _run_label(args) -> str:
     label = args.method
     if getattr(args, "critic_layer_norm", False):
         label += "_ln"
+    if getattr(args, "critic_output_l2_weight", 0.0) > 0.0:
+        label += "_l2"
     return label
 
 
 # ── eval helper (new) ─────────────────────────────────────────────────────────
 
 def _maybe_run_eval(policy, ckpt_dict: dict, args, step: int) -> None:
-    """Save a minimal checkpoint at `step` and run evaluate_checkpoints.py on it.
-
-    Writes JSON to:  eval_output_dir / step_{step:06d} / {task_name}_{method}.json
-    Skips silently if the JSON already exists (crash-safe resume).
-    Does nothing if args.eval_output_dir is empty.
-    """
     eval_output_dir = getattr(args, "eval_output_dir", "")
     if not eval_output_dir:
         return

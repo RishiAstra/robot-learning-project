@@ -49,6 +49,8 @@ def _run_label(method: str, hparams: dict) -> str:
     label = method
     if hparams.get("critic_layer_norm", False):
         label += "_ln"
+    if hparams.get("critic_output_l2_weight", 0.0) > 0.0:
+        label += "_l2"
     return label
 
 
@@ -82,7 +84,8 @@ HPARAMS = {
     "actor_bc_decay":         0.99995,
     "eval_rollouts":          50,
     "eval_horizon":           400,
-    "critic_layer_norm": True,
+    "critic_layer_norm":      False,
+    "critic_output_l2_weight": 1e-2,
 }
 
 # ── helpers ───────────────────────────────────────────────────────────────────
