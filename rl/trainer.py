@@ -217,6 +217,7 @@ class SACTrainer:
             burnin_len=args.burnin_len,
             gamma=args.gamma,
             tau=args.tau,
+            critic_output_l2_weight=args.critic_output_l2_weight,
             bc_weight=bc_weight,
             bc_batch=bc_batch,
         )
@@ -270,6 +271,7 @@ class SACTrainer:
                 print(
                     f"step={step} method={args.method} "
                     f"critic={logs['critic_loss']:.3f} actor={logs['actor_loss']:.3f} "
+                    f"td={logs['td_loss']:.3f} q_l2={logs['critic_output_l2']:.3f} "
                     f"rl={logs['rl_loss']:.3f} bc={logs['bc_loss']:.3f} "
                     f"bc_w={logs['bc_weight']:.4f} alpha={logs['alpha']:.4f}"
                 )
@@ -386,6 +388,7 @@ class PPOTrainer:
             value_clip_coef=args.ppo_clip_coef,
             value_coef=args.value_coef,
             entropy_coef=args.entropy_coef,
+            critic_output_l2_weight=args.critic_output_l2_weight,
             max_grad_norm=1.0,
             update_epochs=args.ppo_epochs,
             demo_batch=demo_batch,
@@ -446,7 +449,8 @@ class PPOTrainer:
                     print(
                         f"update@{step} method={args.method} "
                         f"policy={logs['policy_loss']:.3f} value={logs['value_loss']:.3f} "
-                        f"bc={logs['bc_loss']:.3f} kl={logs['approx_kl']:.4f} clip={logs['clip_fraction']:.3f}"
+                        f"v_l2={logs['value_output_l2']:.3f} bc={logs['bc_loss']:.3f} "
+                        f"kl={logs['approx_kl']:.4f} clip={logs['clip_fraction']:.3f}"
                     )
 
             if step > self.start_step and step % args.checkpoint_interval == 0:
@@ -465,7 +469,8 @@ class PPOTrainer:
                 print(
                     f"final_update method={args.method} "
                     f"policy={logs['policy_loss']:.3f} value={logs['value_loss']:.3f} "
-                    f"bc={logs['bc_loss']:.3f} kl={logs['approx_kl']:.4f} clip={logs['clip_fraction']:.3f}"
+                    f"v_l2={logs['value_output_l2']:.3f} bc={logs['bc_loss']:.3f} "
+                    f"kl={logs['approx_kl']:.4f} clip={logs['clip_fraction']:.3f}"
                 )
 
         self.save_checkpoint(args.total_steps, stats={})
