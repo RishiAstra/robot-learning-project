@@ -49,6 +49,7 @@ def sac_update(
     burnin_len: int,
     gamma: float,
     tau: float,
+    critic_output_l2_weight: float = 0.0,
     bc_weight: float = 0.0,
     bc_batch=None,
 ):
@@ -77,7 +78,9 @@ def sac_update(
     obs_feat_actor = encode_obs_sequence(actor, obs_learn, detach=False)
     obs_feat = obs_feat_actor.detach()
     q1, q2 = critic(obs_feat, actions_learn)
-    critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
+    td_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
+    critic_output_l2 = 0.5 * (q1.pow(2).mean() + q2.pow(2).mean())
+    critic_loss = td_loss + critic_output_l2_weight * critic_output_l2
 
     critic_optimizer.zero_grad()
     critic_loss.backward()
@@ -118,6 +121,8 @@ def sac_update(
 
     return {
         "critic_loss": float(critic_loss.item()),
+        "td_loss": float(td_loss.item()),
+        "critic_output_l2": float(critic_output_l2.item()),
         "actor_loss": float(actor_loss.item()),
         "rl_loss": float(rl_loss.item()),
         "bc_loss": float(bc_loss.item()),

@@ -43,6 +43,7 @@ class Args:
     actor_bc_weight: float
     actor_bc_decay: float
     critic_layer_norm: bool
+    critic_output_l2_weight: float
     output_dir: str
 
 
@@ -78,6 +79,7 @@ def parse_args() -> Args:
     parser.add_argument("--actor-bc-weight", type=float, default=0.5)
     parser.add_argument("--actor-bc-decay", type=float, default=0.99995)
     parser.add_argument("--critic-layer-norm", action="store_true", default=False)
+    parser.add_argument("--critic-output-l2-weight", type=float, default=0.0)
     parser.add_argument("--output-dir", default=str(SCRIPT_DIR / "rl_runs"))
     ns = parser.parse_args()
     return Args(
@@ -111,5 +113,6 @@ def parse_args() -> Args:
         actor_bc_weight=ns.actor_bc_weight,
         actor_bc_decay=ns.actor_bc_decay,
         critic_layer_norm=ns.critic_layer_norm,
+        critic_output_l2_weight=ns.critic_output_l2_weight,
         output_dir=ns.output_dir,
     )
