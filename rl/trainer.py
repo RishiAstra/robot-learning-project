@@ -35,6 +35,14 @@ def _state_step(ckpt_dict: dict) -> int:
     return int(ckpt_dict.get("rl_state", {}).get("step", 0))
 
 
+def _run_label(args) -> str:
+    """Canonical name for this run, used in all output filenames."""
+    label = args.method
+    if getattr(args, "critic_layer_norm", False):
+        label += "_ln"
+    return label
+
+
 # ── eval helper (new) ─────────────────────────────────────────────────────────
 
 def _maybe_run_eval(policy, ckpt_dict: dict, args, step: int) -> None:
@@ -55,14 +63,14 @@ def _maybe_run_eval(policy, ckpt_dict: dict, args, step: int) -> None:
                         .lower().replace("-", "_"))
 
     step_dir = Path(eval_output_dir) / f"step_{step:06d}"
-    json_path = step_dir / f"{task}_{args.method}.json"
+    json_path = step_dir / f"{task}_{_run_label(args)}.json"
 
     if json_path.exists():
         print(f"[eval] step={step} already evaluated — skipping")
         return
 
     step_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = step_dir / f"{task}_{args.method}.pth"
+    ckpt_path = step_dir / f"{task}_{_run_label(args)}.pth"
 
     save_robomimic_policy_checkpoint(
         policy, ckpt_dict, ckpt_path,
@@ -214,7 +222,7 @@ class SACTrainer:
         )
 
     def save_checkpoint(self, step: int, stats):
-        save_path = self.output_dir / f"{self.args.method}_step_{step:06d}.pth"
+        save_path = self.output_dir / f"{_run_label(self.args)}_step_{step:06d}.pth"
         save_robomimic_policy_checkpoint(
             self.policy, self.ckpt_dict, save_path,
             rl_state={
@@ -345,7 +353,7 @@ class PPOTrainer:
         print(f"resumed PPO rl_state from step {self.start_step}")
 
     def save_checkpoint(self, step: int, stats):
-        save_path = self.output_dir / f"{self.args.method}_step_{step:06d}.pth"
+        save_path = self.output_dir / f"{_run_label(self.args)}_step_{step:06d}.pth"
         save_robomimic_policy_checkpoint(
             self.policy, self.ckpt_dict, save_path,
             rl_state={"value_net": self.value_net.state_dict(), "step": step, "stats": stats, "args": vars(self.args)},

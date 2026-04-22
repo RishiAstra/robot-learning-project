@@ -44,6 +44,14 @@ TRAIN_SCRIPT  = SCRIPT_DIR.parent / "train_rl.py"
 
 ALL_METHODS   = ["sac_bc_init", "sac_dapg", "sac_fd", "ppo", "ppo_dapg"]
 
+def _run_label(method: str, hparams: dict) -> str:
+    """Canonical name for this run, used in all output filenames."""
+    label = method
+    if hparams.get("critic_layer_norm", False):
+        label += "_ln"
+    return label
+
+
 # ── hardcoded training hyperparameters ────────────────────────────────────────
 # Tune these here rather than passing dozens of flags on the command line.
 
@@ -74,6 +82,7 @@ HPARAMS = {
     "actor_bc_decay":         0.99995,
     "eval_rollouts":          50,
     "eval_horizon":           400,
+    "critic_layer_norm": True,
 }
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -86,8 +95,8 @@ def find_bc_checkpoint(task: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def final_json_exists(eval_root: Path, task: str, method: str, total_steps: int) -> bool:
-    p = eval_root / f"step_{total_steps:06d}" / f"{task}_{method}.json"
+def final_json_exists(eval_root: Path, task: str, label: str, total_steps: int) -> bool:
+    p = eval_root / f"step_{total_steps:06d}" / f"{task}_{label}.json"
     return p.exists()
 
 
@@ -107,7 +116,7 @@ def build_train_cmd(
         "--method",               method,
         "--ckpt-path",            str(ckpt_path),
         "--total-steps",          str(total_steps),
-        "--output-dir",           str(out_dir / f"{task}_{method}"),
+        "--output-dir",           str(out_dir / f"{task}_{_run_label(method, hparams)}"),
         "--eval-output-dir",      str(eval_root),
         "--task-name",            task,
         "--eval-interval",        str(eval_interval),
@@ -155,11 +164,11 @@ def main():
     done = skipped = failed = 0
 
     for task, method in combos:
-        label = f"{task}/{method}"
+        label = _run_label(method, hparams)
 
         # skip if final eval JSON already exists
-        if final_json_exists(eval_root, task, method, args.total_steps):
-            print(f"[SKIP] {label}  (final eval JSON exists)")
+        if final_json_exists(eval_root, task, label, args.total_steps):
+            print(f"[SKIP] {task}/{label}  (final eval JSON exists)")
             skipped += 1
             continue
 
@@ -191,7 +200,7 @@ def main():
             continue
 
         # verify the final JSON was actually written
-        if final_json_exists(eval_root, task, method, args.total_steps):
+        if final_json_exists(eval_root, task, label, args.total_steps):
             print(f"[DONE] {label}")
             done += 1
         else:
