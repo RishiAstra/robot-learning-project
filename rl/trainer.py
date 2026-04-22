@@ -48,7 +48,7 @@ def _maybe_run_eval(policy, ckpt_dict: dict, args, step: int) -> None:
     if not eval_output_dir:
         return
 
-    eval_script = Path(__file__).parent / "evaluate_checkpoints.py"
+    eval_script = Path(__file__).parent.parent / "evaluate_checkpoints.py"
 
     task = (getattr(args, "task_name", "")
             or ckpt_dict.get("env_metadata", {}).get("env_name", "task")
