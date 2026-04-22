@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -32,6 +34,58 @@ def save_robomimic_policy_checkpoint(policy, ckpt_dict, save_path: Path, rl_stat
 def _state_step(ckpt_dict: dict) -> int:
     return int(ckpt_dict.get("rl_state", {}).get("step", 0))
 
+
+# ── eval helper (new) ─────────────────────────────────────────────────────────
+
+def _maybe_run_eval(policy, ckpt_dict: dict, args, step: int) -> None:
+    """Save a minimal checkpoint at `step` and run evaluate_checkpoints.py on it.
+
+    Writes JSON to:  eval_output_dir / step_{step:06d} / {task_name}_{method}.json
+    Skips silently if the JSON already exists (crash-safe resume).
+    Does nothing if args.eval_output_dir is empty.
+    """
+    eval_output_dir = getattr(args, "eval_output_dir", "")
+    if not eval_output_dir:
+        return
+
+    eval_script = Path(__file__).parent / "evaluate_checkpoints.py"
+
+    task = (getattr(args, "task_name", "")
+            or ckpt_dict.get("env_metadata", {}).get("env_name", "task")
+                        .lower().replace("-", "_"))
+
+    step_dir = Path(eval_output_dir) / f"step_{step:06d}"
+    json_path = step_dir / f"{task}_{args.method}.json"
+
+    if json_path.exists():
+        print(f"[eval] step={step} already evaluated — skipping")
+        return
+
+    step_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = step_dir / f"{task}_{args.method}.pth"
+
+    save_robomimic_policy_checkpoint(
+        policy, ckpt_dict, ckpt_path,
+        rl_state={"step": step},
+    )
+
+    n_rollouts = getattr(args, "eval_rollouts", 20)
+    horizon    = getattr(args, "eval_horizon",  getattr(args, "max_ep_len", 400))
+
+    result = subprocess.run(
+        [sys.executable, str(eval_script),
+         "--agent",       str(ckpt_path),
+         "--n-rollouts",  str(n_rollouts),
+         "--horizon",     str(horizon),
+         "--output-json", str(json_path)],
+        check=False,
+    )
+    if result.returncode != 0:
+        print(f"[eval] evaluate_checkpoints.py failed at step={step} (exit {result.returncode})")
+        json_path.unlink(missing_ok=True)
+
+
+# ── trainers ──────────────────────────────────────────────────────────────────
 
 class SACTrainer:
     def __init__(self, args):
@@ -82,7 +136,13 @@ class SACTrainer:
         self.online_replay = SequenceReplayBuffer(args.online_buffer_capacity, self.seq_len, self.obs_keys)
         self.demo_replay = SequenceReplayBuffer(args.demo_buffer_capacity, self.seq_len, self.obs_keys)
 
-        dataset_path = self.config.train.data[0]["path"]
+        _data = self.config.train.data
+        if isinstance(_data, str):
+            dataset_path = _data
+        elif isinstance(_data[0], dict):
+            dataset_path = _data[0]["path"]
+        else:
+            dataset_path = _data[0]
         load_demo_sequences(dataset_path, self.demo_replay, self.obs_keys, max_demos=args.demo_max_demos)
 
         self.output_dir = Path(args.output_dir).expanduser().resolve()
@@ -121,8 +181,6 @@ class SACTrainer:
         online_batch = self.online_replay.sample(n_online, self.device)
         demo_batch = self.demo_replay.sample(n_demo, self.device)
         train_batch = cat_batches(online_batch, demo_batch) if args.method == "sac_fd" else online_batch
-        # sac_fd (DDPGfD-style) mixes demos into the critic batch AND adds a
-        # BC actor loss, matching the original DDPGfD actor regularization.
         bc_batch = demo_batch if args.method in ("sac_dapg", "sac_fd") else None
         bc_weight = args.actor_bc_weight if args.method in ("sac_dapg", "sac_fd") else 0.0
         return train_batch, bc_batch, bc_weight
@@ -211,7 +269,14 @@ class SACTrainer:
             if step > self.start_step and step % args.checkpoint_interval == 0:
                 self.save_checkpoint(step, stats={})
 
+            # intermediate evals (new)
+            if (args.eval_interval > 0
+                    and step > self.start_step
+                    and step % args.eval_interval == 0):
+                _maybe_run_eval(self.policy, self.ckpt_dict, args, step)
+
         self.save_checkpoint(args.total_steps, stats={})
+        _maybe_run_eval(self.policy, self.ckpt_dict, args, args.total_steps)  # always eval final (new)
         print(f"elapsed_sec={time.time() - start_time:.1f}")
         return {}
 
@@ -256,7 +321,13 @@ class PPOTrainer:
             args.burnin_len + args.learn_len,
             self.obs_keys,
         )
-        dataset_path = self.config.train.data[0]["path"]
+        _data = self.config.train.data
+        if isinstance(_data, str):
+            dataset_path = _data
+        elif isinstance(_data[0], dict):
+            dataset_path = _data[0]["path"]
+        else:
+            dataset_path = _data[0]
         load_demo_sequences(dataset_path, self.demo_replay, self.obs_keys, max_demos=args.demo_max_demos)
 
         self.output_dir = Path(args.output_dir).expanduser().resolve()
@@ -373,6 +444,12 @@ class PPOTrainer:
             if step > self.start_step and step % args.checkpoint_interval == 0:
                 self.save_checkpoint(step, stats={})
 
+            # intermediate evals (new)
+            if (args.eval_interval > 0
+                    and step > self.start_step
+                    and step % args.eval_interval == 0):
+                _maybe_run_eval(self.policy, self.ckpt_dict, args, step)
+
         self.rollout_buffer.flush_episode()
         if len(self.rollout_buffer) > 0:
             logs = self.maybe_update()
@@ -384,4 +461,5 @@ class PPOTrainer:
                 )
 
         self.save_checkpoint(args.total_steps, stats={})
+        _maybe_run_eval(self.policy, self.ckpt_dict, args, args.total_steps)  # always eval final (new)
         print(f"elapsed_sec={time.time() - start_time:.1f}")

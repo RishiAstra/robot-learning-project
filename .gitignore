@@ -5,6 +5,7 @@ rl_runs/
 rl_finetune/
 training_results/
 paper/
+logs/
 
 # Model checkpoints and rollout media
 *.pth

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import tqdm
 
 # Avoid robosuite / numba cache issues in moved workspaces unless the caller
 # explicitly overrides this environment variable beforehand.
@@ -67,7 +68,7 @@ def evaluate_checkpoint(agent_path, n_rollouts, horizon, env_name, seed):
         torch.manual_seed(seed)
 
     rollout_stats = []
-    for _ in range(n_rollouts):
+    for _ in tqdm.tqdm(range(n_rollouts), desc=f"Evaluating {agent_path}"):
         stats, _ = rollout(
             policy=policy,
             env=env,

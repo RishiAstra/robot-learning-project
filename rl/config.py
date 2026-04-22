@@ -44,6 +44,12 @@ class Args:
     actor_bc_decay: float
     critic_layer_norm: bool
     output_dir: str
+    # eval (new)
+    eval_interval: int
+    eval_output_dir: str
+    task_name: str
+    eval_rollouts: int
+    eval_horizon: int
 
 
 def parse_args() -> Args:
@@ -79,6 +85,19 @@ def parse_args() -> Args:
     parser.add_argument("--actor-bc-decay", type=float, default=0.99995)
     parser.add_argument("--critic-layer-norm", action="store_true", default=False)
     parser.add_argument("--output-dir", default=str(SCRIPT_DIR / "rl_runs"))
+    # eval args (new)
+    parser.add_argument("--eval-interval",   type=int, default=0,
+                        help="Eval every N steps. 0 = final only.")
+    parser.add_argument("--eval-output-dir", default="",
+                        help="Root dir for step_N/ eval JSONs. Empty = no eval.")
+    parser.add_argument("--task-name",       default="",
+                        help="Task name used in output filenames (e.g. coffee_d1). "
+                             "Derived from env_metadata if omitted.")
+    parser.add_argument("--eval-rollouts",   type=int, default=20,
+                        help="Rollouts per eval call.")
+    parser.add_argument("--eval-horizon",    type=int, default=400,
+                        help="Horizon per eval rollout.")
+
     ns = parser.parse_args()
     return Args(
         method=ns.method,
@@ -112,4 +131,9 @@ def parse_args() -> Args:
         actor_bc_decay=ns.actor_bc_decay,
         critic_layer_norm=ns.critic_layer_norm,
         output_dir=ns.output_dir,
+        eval_interval=ns.eval_interval,
+        eval_output_dir=ns.eval_output_dir,
+        task_name=ns.task_name,
+        eval_rollouts=ns.eval_rollouts,
+        eval_horizon=ns.eval_horizon,
     )

@@ -3,7 +3,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
-PYTHON_BIN="${PYTHON_BIN:-$HOME/.conda/envs/mimicgen/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-$HOME/miniconda3/envs/mimicgen/bin/python}"
 CKPT="${1:-$WORKSPACE_ROOT/mimicgen/datasets/core_training_results_quick/bc_rnn_low_dim_ds_square_D2_seed_101_quick_r3/20260410144913/models/model_epoch_20_demo_success_0.0.pth}"
 N_ROLLOUTS="${2:-20}"
 HORIZON="${3:-400}"
