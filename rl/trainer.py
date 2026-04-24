@@ -64,7 +64,7 @@ def _run_label(args) -> str:
     return label
 
 
-# ── eval helper (new) ─────────────────────────────────────────────────────────
+# ── eval helper ───────────────────────────────────────────────────────────────
 
 def _maybe_run_eval(policy, ckpt_dict: dict, args, step: int) -> None:
     eval_output_dir = getattr(args, "eval_output_dir", "")
@@ -162,6 +162,7 @@ class SACTrainer:
         self.bc_weight = args.actor_bc_weight
         self.ema_success_rate = args.bc_baseline_success
         self.baseline_success_rate = args.bc_baseline_success
+        self.best_ema_success_rate = args.bc_baseline_success
         self.episode_ema_history: list = []   # [(step, ema, bc_weight), ...]
         self.episode_count = 0
 
@@ -209,11 +210,12 @@ class SACTrainer:
 
         # adaptive BC state
         if self.args.adaptive_bc:
-            self.ema_success_rate    = rl_state.get("ema_success_rate",    self.args.bc_baseline_success)
-            self.bc_weight           = rl_state.get("bc_weight",           self.args.actor_bc_weight)
+            self.ema_success_rate      = rl_state.get("ema_success_rate",      self.args.bc_baseline_success)
+            self.best_ema_success_rate = rl_state.get("best_ema_success_rate", self.args.bc_baseline_success)
+            self.bc_weight             = rl_state.get("bc_weight",             self.args.actor_bc_weight)
             self.baseline_success_rate = rl_state.get("baseline_success_rate", self.args.bc_baseline_success)
-            self.episode_ema_history = rl_state.get("episode_ema_history", [])
-            self.episode_count       = rl_state.get("episode_count",       0)
+            self.episode_ema_history   = rl_state.get("episode_ema_history",   [])
+            self.episode_count         = rl_state.get("episode_count",         0)
 
         print(f"resumed rl_state from step {self.start_step}")
 
@@ -282,6 +284,7 @@ class SACTrainer:
         if self.args.adaptive_bc:
             rl_state.update({
                 "ema_success_rate":      self.ema_success_rate,
+                "best_ema_success_rate": self.best_ema_success_rate,
                 "bc_weight":             self.bc_weight,
                 "baseline_success_rate": self.baseline_success_rate,
                 "episode_ema_history":   self.episode_ema_history,
@@ -319,10 +322,13 @@ class SACTrainer:
                 self.online_replay.flush_episode()
 
                 if args.adaptive_bc:
-                    alpha = args.bc_ema_alpha
-                    self.ema_success_rate = alpha * float(ep_success) + (1.0 - alpha) * self.ema_success_rate
-                    if self.ema_success_rate < self.baseline_success_rate:
-                        self.bc_weight = min(self.bc_weight + 0.05 * args.actor_bc_weight, args.actor_bc_weight)
+                    self.ema_success_rate = (
+                        args.bc_ema_alpha * float(ep_success)
+                        + (1.0 - args.bc_ema_alpha) * self.ema_success_rate
+                    )
+                    self.best_ema_success_rate = max(self.best_ema_success_rate, self.ema_success_rate)
+                    if self.ema_success_rate < self.best_ema_success_rate:
+                        pass  # hold bc_weight steady
                     else:
                         self.bc_weight = max(self.bc_weight * 0.97, 0.0)
                     self.episode_count += 1
@@ -330,7 +336,7 @@ class SACTrainer:
                     print(
                         f"episode={self.episode_count} step={step} "
                         f"success={int(ep_success)} ema={self.ema_success_rate:.3f} "
-                        f"bc_weight={self.bc_weight:.4f}"
+                        f"best={self.best_ema_success_rate:.3f} bc_weight={self.bc_weight:.4f}"
                     )
 
                 obs = filter_obs(self.env.reset(), self.obs_keys)
@@ -352,14 +358,13 @@ class SACTrainer:
             if step > self.start_step and step % args.checkpoint_interval == 0:
                 self.save_checkpoint(step, stats={})
 
-            # intermediate evals (new)
             if (args.eval_interval > 0
                     and step > self.start_step
                     and step % args.eval_interval == 0):
                 _maybe_run_eval(self.policy, self.ckpt_dict, args, step)
 
         self.save_checkpoint(args.total_steps, stats={})
-        _maybe_run_eval(self.policy, self.ckpt_dict, args, args.total_steps)  # always eval final (new)
+        _maybe_run_eval(self.policy, self.ckpt_dict, args, args.total_steps)
         print(f"elapsed_sec={time.time() - start_time:.1f}")
         return {}
 
@@ -531,7 +536,6 @@ class PPOTrainer:
             if step > self.start_step and step % args.checkpoint_interval == 0:
                 self.save_checkpoint(step, stats={})
 
-            # intermediate evals (new)
             if (args.eval_interval > 0
                     and step > self.start_step
                     and step % args.eval_interval == 0):
@@ -549,5 +553,5 @@ class PPOTrainer:
                 )
 
         self.save_checkpoint(args.total_steps, stats={})
-        _maybe_run_eval(self.policy, self.ckpt_dict, args, args.total_steps)  # always eval final (new)
+        _maybe_run_eval(self.policy, self.ckpt_dict, args, args.total_steps)
         print(f"elapsed_sec={time.time() - start_time:.1f}")
