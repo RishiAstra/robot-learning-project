@@ -155,7 +155,16 @@ class SACTrainer:
         self.log_alpha = torch.tensor(0.0, requires_grad=True, device=self.device)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=args.alpha_lr)
         self.target_entropy = -float(action_dim)
+
         self.start_step = _state_step(self.ckpt_dict)
+
+        # adaptive BC — initialise before _load_rl_state so resume can override
+        self.bc_weight = args.actor_bc_weight
+        self.ema_success_rate = args.bc_baseline_success
+        self.baseline_success_rate = args.bc_baseline_success
+        self.episode_ema_history: list = []   # [(step, ema, bc_weight), ...]
+        self.episode_count = 0
+
         self._load_rl_state()
 
         self.seq_len = args.burnin_len + args.learn_len
@@ -190,7 +199,23 @@ class SACTrainer:
         if "log_alpha" in rl_state:
             self.log_alpha.data.copy_(rl_state["log_alpha"].to(self.device))
 
-        print(f"resumed SAC rl_state from step {self.start_step}")
+        # optimizer states — prevents momentum reset on resume
+        if "actor_optimizer" in rl_state:
+            self.actor_optimizer.load_state_dict(rl_state["actor_optimizer"])
+        if "critic_optimizer" in rl_state:
+            self.critic_optimizer.load_state_dict(rl_state["critic_optimizer"])
+        if "alpha_optimizer" in rl_state:
+            self.alpha_optimizer.load_state_dict(rl_state["alpha_optimizer"])
+
+        # adaptive BC state
+        if self.args.adaptive_bc:
+            self.ema_success_rate    = rl_state.get("ema_success_rate",    self.args.bc_baseline_success)
+            self.bc_weight           = rl_state.get("bc_weight",           self.args.actor_bc_weight)
+            self.baseline_success_rate = rl_state.get("baseline_success_rate", self.args.bc_baseline_success)
+            self.episode_ema_history = rl_state.get("episode_ema_history", [])
+            self.episode_count       = rl_state.get("episode_count",       0)
+
+        print(f"resumed rl_state from step {self.start_step}")
 
     def select_update_batches(self):
         args = self.args
@@ -219,8 +244,11 @@ class SACTrainer:
             return None
 
         batch, bc_batch, bc_weight = self.select_update_batches()
-        if bc_weight > 0.0:
+        if args.adaptive_bc:
+            bc_weight = self.bc_weight          # live adaptive value, no per-step decay
+        elif bc_weight > 0.0:
             bc_weight *= args.actor_bc_decay ** step
+
         return sac_update(
             actor=self.actor,
             actor_target=self.actor_target,
@@ -241,16 +269,25 @@ class SACTrainer:
 
     def save_checkpoint(self, step: int, stats):
         save_path = self.output_dir / f"{_run_label(self.args)}_step_{step:06d}.pth"
-        save_robomimic_policy_checkpoint(
-            self.policy, self.ckpt_dict, save_path,
-            rl_state={
-                "critic": self.critic.state_dict(),
-                "critic_target": self.critic_target.state_dict(),
-                "actor_target": self.actor_target.state_dict(),
-                "log_alpha": self.log_alpha.detach().cpu(),
-                "step": step, "stats": stats, "args": vars(self.args),
-            },
-        )
+        rl_state = {
+            "critic":          self.critic.state_dict(),
+            "critic_target":   self.critic_target.state_dict(),
+            "actor_target":    self.actor_target.state_dict(),
+            "log_alpha":       self.log_alpha.detach().cpu(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "critic_optimizer":self.critic_optimizer.state_dict(),
+            "alpha_optimizer": self.alpha_optimizer.state_dict(),
+            "step": step, "stats": stats, "args": vars(self.args),
+        }
+        if self.args.adaptive_bc:
+            rl_state.update({
+                "ema_success_rate":      self.ema_success_rate,
+                "bc_weight":             self.bc_weight,
+                "baseline_success_rate": self.baseline_success_rate,
+                "episode_ema_history":   self.episode_ema_history,
+                "episode_count":         self.episode_count,
+            })
+        save_robomimic_policy_checkpoint(self.policy, self.ckpt_dict, save_path, rl_state=rl_state)
 
     def train(self):
         args = self.args
@@ -259,6 +296,7 @@ class SACTrainer:
         rollout_state = None
         rollout_rnn_steps = 0
         ep_len = 0
+        ep_success = False          # tracks success anywhere in the episode
         start_time = time.time()
 
         for step in range(self.start_step, args.total_steps):
@@ -268,6 +306,7 @@ class SACTrainer:
             next_obs_raw, reward, done, _ = self.env.step(action)
             next_obs = filter_obs(next_obs_raw, self.obs_keys)
             success = self.env.is_success()["task"]
+            ep_success = ep_success or bool(success)
             reward = float(reward)
             terminal = bool(done or success or (ep_len + 1) >= args.max_ep_len)
             self.online_replay.add_step(obs, action, reward, next_obs, terminal)
@@ -278,10 +317,27 @@ class SACTrainer:
 
             if terminal:
                 self.online_replay.flush_episode()
+
+                if args.adaptive_bc:
+                    alpha = args.bc_ema_alpha
+                    self.ema_success_rate = alpha * float(ep_success) + (1.0 - alpha) * self.ema_success_rate
+                    if self.ema_success_rate < self.baseline_success_rate:
+                        self.bc_weight = min(self.bc_weight + 0.05 * args.actor_bc_weight, args.actor_bc_weight)
+                    else:
+                        self.bc_weight = max(self.bc_weight * 0.97, 0.0)
+                    self.episode_count += 1
+                    self.episode_ema_history.append((step, self.ema_success_rate, self.bc_weight))
+                    print(
+                        f"episode={self.episode_count} step={step} "
+                        f"success={int(ep_success)} ema={self.ema_success_rate:.3f} "
+                        f"bc_weight={self.bc_weight:.4f}"
+                    )
+
                 obs = filter_obs(self.env.reset(), self.obs_keys)
                 rollout_state = None
                 rollout_rnn_steps = 0
                 ep_len = 0
+                ep_success = False
 
             logs = self.maybe_update(step)
             if logs is not None and step % 200 == 0:

@@ -51,6 +51,9 @@ class Args:
     task_name: str
     eval_rollouts: int
     eval_horizon: int
+    adaptive_bc: bool
+    bc_baseline_success: float
+    bc_ema_alpha: float
 
 
 def parse_args() -> Args:
@@ -100,7 +103,17 @@ def parse_args() -> Args:
     parser.add_argument("--eval-horizon",    type=int, default=400,
                         help="Horizon per eval rollout.")
 
+    parser.add_argument("--adaptive-bc", action="store_true", default=False,
+                        help="Dynamically adjust BC loss weight based on rolling success rate.")
+    parser.add_argument("--bc-baseline-success", type=float, default=None,
+                        help="Known BC policy success rate (required with --adaptive-bc).")
+    parser.add_argument("--bc-ema-alpha", type=float, default=0.05,
+                        help="EMA decay for per-episode success rate estimate.")
+
     ns = parser.parse_args()
+    if ns.adaptive_bc and ns.bc_baseline_success is None:
+        parser.error("--bc-baseline-success is required when using --adaptive-bc")
+
     return Args(
         method=ns.method,
         ckpt_path=str(Path(ns.ckpt_path).expanduser().resolve()),
@@ -139,4 +152,7 @@ def parse_args() -> Args:
         task_name=ns.task_name,
         eval_rollouts=ns.eval_rollouts,
         eval_horizon=ns.eval_horizon,
+        adaptive_bc=ns.adaptive_bc,
+        bc_baseline_success=ns.bc_baseline_success if ns.bc_baseline_success is not None else 0.0,
+        bc_ema_alpha=ns.bc_ema_alpha,
     )
