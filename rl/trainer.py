@@ -22,6 +22,8 @@ from rl.sac import TwinQNetwork, sac_update
 
 os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
+_BC_TOP_K = 10  # number of peak EMA values averaged to form the decay threshold
+
 
 def save_robomimic_policy_checkpoint(policy, ckpt_dict, save_path: Path, rl_state: dict) -> None:
     updated_ckpt = dict(ckpt_dict)
@@ -162,8 +164,8 @@ class SACTrainer:
         self.bc_weight = args.actor_bc_weight
         self.ema_success_rate = args.bc_baseline_success
         self.baseline_success_rate = args.bc_baseline_success
-        self.best_ema_success_rate = args.bc_baseline_success
-        self.episode_ema_history: list = []   # [(step, ema, bc_weight), ...]
+        self.top_ema_values: list[float] = []   # sorted desc, capped at _BC_TOP_K
+        self.episode_ema_history: list = []     # [(step, ema, bc_weight), ...]
         self.episode_count = 0
 
         self._load_rl_state()
@@ -210,12 +212,12 @@ class SACTrainer:
 
         # adaptive BC state
         if self.args.adaptive_bc:
-            self.ema_success_rate      = rl_state.get("ema_success_rate",      self.args.bc_baseline_success)
-            self.best_ema_success_rate = rl_state.get("best_ema_success_rate", self.args.bc_baseline_success)
-            self.bc_weight             = rl_state.get("bc_weight",             self.args.actor_bc_weight)
+            self.ema_success_rate    = rl_state.get("ema_success_rate",    self.args.bc_baseline_success)
+            self.top_ema_values      = rl_state.get("top_ema_values",      [])
+            self.bc_weight           = rl_state.get("bc_weight",           self.args.actor_bc_weight)
             self.baseline_success_rate = rl_state.get("baseline_success_rate", self.args.bc_baseline_success)
-            self.episode_ema_history   = rl_state.get("episode_ema_history",   [])
-            self.episode_count         = rl_state.get("episode_count",         0)
+            self.episode_ema_history = rl_state.get("episode_ema_history", [])
+            self.episode_count       = rl_state.get("episode_count",       0)
 
         print(f"resumed rl_state from step {self.start_step}")
 
@@ -284,7 +286,7 @@ class SACTrainer:
         if self.args.adaptive_bc:
             rl_state.update({
                 "ema_success_rate":      self.ema_success_rate,
-                "best_ema_success_rate": self.best_ema_success_rate,
+                "top_ema_values":        self.top_ema_values,
                 "bc_weight":             self.bc_weight,
                 "baseline_success_rate": self.baseline_success_rate,
                 "episode_ema_history":   self.episode_ema_history,
@@ -326,17 +328,20 @@ class SACTrainer:
                         args.bc_ema_alpha * float(ep_success)
                         + (1.0 - args.bc_ema_alpha) * self.ema_success_rate
                     )
-                    self.best_ema_success_rate = max(self.best_ema_success_rate, self.ema_success_rate)
-                    if self.ema_success_rate < self.best_ema_success_rate:
+                    self.top_ema_values.append(self.ema_success_rate)
+                    self.top_ema_values.sort(reverse=True)
+                    self.top_ema_values = self.top_ema_values[:_BC_TOP_K]
+                    top_k_avg = sum(self.top_ema_values) / len(self.top_ema_values)
+                    if self.ema_success_rate < top_k_avg:
                         pass  # hold bc_weight steady
                     else:
-                        self.bc_weight = max(self.bc_weight * 0.97, 0.0)
+                        self.bc_weight = max(self.bc_weight * 0.985, 0.0)
                     self.episode_count += 1
                     self.episode_ema_history.append((step, self.ema_success_rate, self.bc_weight))
                     print(
                         f"episode={self.episode_count} step={step} "
                         f"success={int(ep_success)} ema={self.ema_success_rate:.3f} "
-                        f"best={self.best_ema_success_rate:.3f} bc_weight={self.bc_weight:.4f}"
+                        f"top{_BC_TOP_K}_avg={top_k_avg:.3f} bc_weight={self.bc_weight:.4f}"
                     )
 
                 obs = filter_obs(self.env.reset(), self.obs_keys)
